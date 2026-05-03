@@ -93,6 +93,23 @@ async function ensurePlaywrightBrowsersInstalled() {
   return browserInstallPromise;
 }
 
+async function launchChromiumWithSelfHeal(headed: boolean): Promise<Browser> {
+  const chromium = await getChromium();
+  try {
+    return await chromium.launch({ headless: !headed, slowMo: headed ? 90 : 0 });
+  } catch (error) {
+    if (isMissingSharedLibraryError(error)) {
+      await ensurePlaywrightSystemDepsInstalled();
+      return chromium.launch({ headless: !headed, slowMo: headed ? 90 : 0 });
+    }
+    if (isMissingPlaywrightExecutableError(error)) {
+      await ensurePlaywrightBrowsersInstalled();
+      return chromium.launch({ headless: !headed, slowMo: headed ? 90 : 0 });
+    }
+    throw error;
+  }
+}
+
 const SELECTORS = {
   navMissions: [/missions?/i, /quest/i],
   navConcepts: [/concepts?/i],
@@ -547,6 +564,11 @@ async function runFarmAccountsJob(
   totalTasksPerAccount: number,
 ) {
   try {
+  // One preflight launch prevents "first account fails" while deps are installed.
+  const preflight = await launchChromiumWithSelfHeal(false);
+  await preflight.close().catch(() => null);
+  await appendLog("Browser runtime check passed.", "info");
+
   for (let accountIndex = 0; accountIndex < rotated.length; accountIndex += 1) {
     const account = rotated[accountIndex];
     const originalIndex = updated.findIndex((a) => a.id === account.id);
@@ -582,20 +604,7 @@ async function runFarmAccountsJob(
     const startedAt = Date.now();
 
     try {
-      const chromium = await getChromium();
-      try {
-        browser = await chromium.launch({ headless: !headed, slowMo: headed ? 90 : 0 });
-      } catch (error) {
-        if (isMissingSharedLibraryError(error)) {
-          await ensurePlaywrightSystemDepsInstalled();
-          browser = await chromium.launch({ headless: !headed, slowMo: headed ? 90 : 0 });
-        } else if (isMissingPlaywrightExecutableError(error)) {
-          await ensurePlaywrightBrowsersInstalled();
-          browser = await chromium.launch({ headless: !headed, slowMo: headed ? 90 : 0 });
-        } else {
-          throw error;
-        }
-      }
+      browser = await launchChromiumWithSelfHeal(headed);
       const token = typeof account.agentSessionToken === "string" ? account.agentSessionToken.trim() : "";
       const extraHTTPHeaders =
         token.length > 0
