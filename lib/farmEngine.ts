@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { chromium, type BrowserContext, type Cookie, type Locator, type Page } from "playwright";
 import { POST_TEMPLATES, THEMES } from "@/lib/agentConfig";
+import { isFarmCooldownEnabled } from "@/lib/farmCooldown";
 import { fetchXHandleForAgentToken, isPlaceholderXHandle } from "@/lib/simclusterProfile";
 import { serverPaths } from "@/lib/serverDataPaths";
 import type { SimclusterAccount } from "@/types";
@@ -515,12 +516,15 @@ export async function farmAllAccounts(headed: boolean = false) {
   }
 
   const finishedAt = new Date();
-  const nextFarmAt = new Date(finishedAt.getTime() + 24 * 60 * 60 * 1000);
+  const cooldownOn = isFarmCooldownEnabled();
+  const nextFarmAtIso = cooldownOn
+    ? new Date(finishedAt.getTime() + 24 * 60 * 60 * 1000).toISOString()
+    : undefined;
   await writeFarmStatus({
     ...(await readFarmStatus()),
     running: false,
     finishedAt: finishedAt.toISOString(),
-    nextFarmAt: nextFarmAt.toISOString(),
+    nextFarmAt: nextFarmAtIso,
     currentAccountId: undefined,
     currentAccountHandle: undefined,
     currentAccountProgress: 100,
@@ -530,7 +534,9 @@ export async function farmAllAccounts(headed: boolean = false) {
       ...(await readFarmStatus()).logs.slice(-59),
       {
         ts: nowIso(),
-        text: `Farm complete for ${rotated.length} account(s). Cooldown started (24h).`,
+        text: cooldownOn
+          ? `Farm complete for ${rotated.length} account(s). Cooldown started (24h).`
+          : `Farm complete for ${rotated.length} account(s). Cooldown is off — run again anytime (set FARM_COOLDOWN_ENABLED=1 to enforce 24h limits).`,
         tone: "success",
       },
     ],
