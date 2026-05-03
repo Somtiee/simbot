@@ -74,19 +74,34 @@ const BROWSER_EXECUTABLES: Record<"chrome" | "edge", string[]> = {
   chrome: [
     process.env.CHROME_PATH ?? "",
     process.env.GOOGLE_CHROME_BIN ?? "",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    "/snap/bin/chromium",
     "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
     "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
     path.join(process.env.LOCALAPPDATA ?? "", "Google", "Chrome", "Application", "chrome.exe"),
   ],
   edge: [
     process.env.EDGE_PATH ?? "",
+    "/usr/bin/microsoft-edge-stable",
+    "/usr/bin/microsoft-edge",
     "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
     "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
     path.join(process.env.LOCALAPPDATA ?? "", "Microsoft", "Edge", "Application", "msedge.exe"),
   ],
 };
 
-async function resolveBrowserExecutable(browser: "chrome" | "edge") {
+/** Interactive profile connect needs a machine with a display (not Railway / headless Linux). */
+function interactiveConnectSupported() {
+  if (process.env.RAILWAY_ENVIRONMENT) return false;
+  if (process.platform === "win32" || process.platform === "darwin") return true;
+  return Boolean(process.env.DISPLAY);
+}
+
+/** System Chrome/Edge if installed; otherwise use Playwright’s bundled Chromium (omit path in launch). */
+async function resolveBrowserExecutable(browser: "chrome" | "edge"): Promise<string | undefined> {
   const candidates = Array.from(new Set(BROWSER_EXECUTABLES[browser].filter(Boolean)));
   for (const executablePath of candidates) {
     try {
@@ -96,7 +111,7 @@ async function resolveBrowserExecutable(browser: "chrome" | "edge") {
       // keep searching
     }
   }
-  return "";
+  return undefined;
 }
 
 function hasValidSimclusterSession(cookies: Cookie[], currentUrl?: string) {
@@ -159,6 +174,15 @@ export async function getAccountConnectStatus(accountId: string) {
   return map[accountId] ?? defaultStatus();
 }
 
+const bundledLaunchOpts = (executablePath?: string) => ({
+  ...(executablePath ? { executablePath } : {}),
+  args: [
+    "--no-default-browser-check",
+    "--no-first-run",
+    "--disable-blink-features=AutomationControlled",
+  ],
+});
+
 export async function startAccountConnect({
   accountId,
   xHandle,
@@ -170,6 +194,16 @@ export async function startAccountConnect({
   const resolvedHandle = xHandle?.trim() || `@${accountId}`;
   const existing = await getAccountConnectStatus(accountId);
   if (existing.state === "running") return;
+
+  if (interactive && !interactiveConnectSupported()) {
+    await setAccountConnectStatus(accountId, {
+      state: "failed",
+      message:
+        "This path opens Chrome on the server (no screen on Railway). Use “Link code” in Connect instead: open simcluster.ai/agent/connect, sign in, paste the code, then Connect with code.",
+      finishedAt: new Date().toISOString(),
+    });
+    return;
+  }
 
   await setAccountConnectStatus(accountId, {
     state: "running",
@@ -185,27 +219,19 @@ export async function startAccountConnect({
   let lastErrorMessage = "";
 
   const executablePath = await resolveBrowserExecutable(browser);
-  if (!executablePath) {
-    await setAccountConnectStatus(accountId, {
-      state: "failed",
-      message: `Could not find installed ${browser} executable on this machine.`,
-      finishedAt: new Date().toISOString(),
-    });
-    return;
-  }
+  const usingBundledChromium = !executablePath;
 
   let page: Page | null = null;
   let usingFreshLoginFallback = false;
 
   if (!interactive) {
     try {
+      const execOpts = bundledLaunchOpts(executablePath);
       context = await chromium.launchPersistentContext(profilePath, {
         headless: false,
-        executablePath,
+        ...execOpts,
         args: [
-          "--no-default-browser-check",
-          "--no-first-run",
-          "--disable-blink-features=AutomationControlled",
+          ...execOpts.args,
           ...(profileDirectory ? [`--profile-directory=${profileDirectory}`] : []),
         ],
         viewport: { width: 1400, height: 900 },
@@ -219,7 +245,9 @@ export async function startAccountConnect({
   if (!context || !page) {
     await setAccountConnectStatus(accountId, {
       message: interactive
-        ? `Opening interactive ${browser} login window...`
+        ? usingBundledChromium
+          ? "Opening interactive window with Playwright Chromium..."
+          : `Opening interactive ${browser} login window...`
         : `Profile launch failed. Trying fresh ${browser} login window fallback... ` +
           `(${lastErrorMessage || "unknown launch error"})`,
     });
@@ -227,12 +255,7 @@ export async function startAccountConnect({
     try {
       launchedBrowser = await chromium.launch({
         headless: false,
-        executablePath,
-        args: [
-          "--no-default-browser-check",
-          "--no-first-run",
-          "--disable-blink-features=AutomationControlled",
-        ],
+        ...bundledLaunchOpts(executablePath),
       });
       context = await launchedBrowser.newContext({ viewport: { width: 1400, height: 900 } });
       page = await context.newPage();

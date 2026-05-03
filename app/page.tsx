@@ -1,7 +1,18 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Bot, Cookie, Download, ExternalLink, Link2, Plus, Radio, ShieldCheck, Sparkles } from "lucide-react";
+import {
+  Bot,
+  Cookie,
+  Download,
+  ExternalLink,
+  Link2,
+  Plus,
+  Radio,
+  ShieldCheck,
+  Sparkles,
+  Trash2,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -64,6 +75,7 @@ const progressFromAccount = (account: SimclusterAccount) => {
 export default function Home() {
   const accounts = useFarmStore((state) => state.accounts);
   const addAccount = useFarmStore((state) => state.addAccount);
+  const removeAccount = useFarmStore((state) => state.removeAccount);
   const updateAccount = useFarmStore((state) => state.updateAccount);
   const setAccounts = useFarmStore((state) => state.setAccounts);
   const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -92,6 +104,10 @@ export default function Home() {
   const [connectBrowser, setConnectBrowser] = useState<"chrome" | "edge">("chrome");
   const [connectStatus, setConnectStatus] = useState<ConnectStatus | null>(null);
   const [isConnectStarting, setIsConnectStarting] = useState(false);
+  const [connectLinkCode, setConnectLinkCode] = useState("");
+  const [isExchangingLink, setIsExchangingLink] = useState(false);
+  const [connectExchangeError, setConnectExchangeError] = useState<string | null>(null);
+  const [connectInteractiveAvailable, setConnectInteractiveAvailable] = useState(true);
   const connectedCount = accounts.length;
   const farmingCount = accounts.filter((account) => account.status === "farming").length;
 
@@ -134,6 +150,19 @@ export default function Home() {
 
     return () => clearInterval(timer);
   }, [setAccounts]);
+
+  useEffect(() => {
+    void fetch("/api/runtime", { cache: "no-store" })
+      .then((response) => response.json())
+      .then((body: { connectInteractiveAvailable?: boolean }) => {
+        if (typeof body.connectInteractiveAvailable === "boolean") {
+          setConnectInteractiveAvailable(body.connectInteractiveAvailable);
+        }
+      })
+      .catch(() => {
+        /* keep default true for local dev */
+      });
+  }, []);
 
   const nextFarmMs = farmStatus.nextFarmAt ? new Date(farmStatus.nextFarmAt).getTime() - cooldownNow : 0;
   const isCooldownActive = nextFarmMs > 0;
@@ -229,7 +258,7 @@ export default function Home() {
             </Badge>
           </div>
           <Badge variant="secondary" className="border border-cyan-400/50 bg-cyan-500/15 text-cyan-200">
-            {connectedCount} Accounts Connected
+            {connectedCount} accounts
           </Badge>
         </div>
       </header>
@@ -263,21 +292,25 @@ export default function Home() {
                     <span className="text-zinc-400">Last farmed {account.lastFarmed ?? "never"}</span>
                   </div>
                   <div className="text-[11px]">
-                    {Array.isArray(account.cookies) && account.cookies.length > 0 ? (
+                    {(Array.isArray(account.cookies) && account.cookies.length > 0) ||
+                    (typeof account.agentSessionToken === "string" && account.agentSessionToken.length > 0) ? (
                       <span className="text-lime-300">Session: Connected</span>
                     ) : (
                       <span className="text-amber-300">Session: Not connected</span>
                     )}
                   </div>
 
-                  <div className="flex gap-2">
+                  <div className="flex flex-wrap gap-2">
                     <Button
                       size="sm"
                       variant="outline"
                       className="h-7 border-cyan-500/40 text-xs text-cyan-200"
+                      title="Link this row to Simcluster using a short code from simcluster.ai/agent/connect (works on Railway and your PC)."
                       onClick={() => {
                         setConnectModalAccountId(account.id);
                         setConnectStatus(null);
+                        setConnectLinkCode("");
+                        setConnectExchangeError(null);
                       }}
                     >
                       <Link2 className="mr-1 size-3" />
@@ -294,7 +327,26 @@ export default function Home() {
                       }}
                     >
                       <Cookie className="mr-1 size-3" />
-                      Re-export cookies
+                      Cookies
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 text-xs text-rose-300 hover:bg-rose-500/10 hover:text-rose-200"
+                      onClick={() => {
+                        if (
+                          !window.confirm(
+                            `Remove ${account.xHandle} from the cluster? This deletes it from the server list after save.`,
+                          )
+                        ) {
+                          return;
+                        }
+                        removeAccount(account.id);
+                        toast.success(`Removed ${account.xHandle}`);
+                      }}
+                    >
+                      <Trash2 className="mr-1 size-3" />
+                      Remove
                     </Button>
                     <Button size="sm" variant="ghost" className="h-7 text-xs text-cyan-200">
                       <ExternalLink className="mr-1 size-3" />
@@ -331,7 +383,8 @@ export default function Home() {
             <Card className="border border-lime-400/50 bg-lime-500/10 shadow-[0_0_40px_rgba(132,204,22,0.25)]">
               <CardContent className="p-6 text-center">
                 <p className="text-lg font-semibold text-lime-200">
-                  ✅ AGENT FARM COMPLETE — ALL 9 ACCOUNTS AT MAX DAILY CLOUT + NEW AI POSTS & IMAGES GENERATED
+                  ✅ AGENT FARM COMPLETE — ALL {connectedCount} ACCOUNTS AT MAX DAILY CLOUT + NEW AI POSTS & IMAGES
+                  GENERATED
                 </p>
                 {isCooldownActive ? (
                   <p className="mt-2 text-sm text-lime-100">Next farm available in {countdownLabel}</p>
@@ -482,7 +535,7 @@ export default function Home() {
                   <li>Open X in your browser and sign into the target account.</li>
                   <li>Open DevTools, then Application tab, and inspect Cookies for `x.com`.</li>
                   <li>Export values (`auth_token`, `ct0`, etc.) in Playwright cookie JSON format.</li>
-                  <li>Use “Re-export cookies” on an account card after each password reset/login challenge.</li>
+                  <li>Use the “Cookies” button on an account card after each password reset or login challenge.</li>
                 </ol>
               </div>
             </div>
@@ -517,85 +570,168 @@ export default function Home() {
             <p className="mt-1 text-sm text-zinc-300">
               Account: <span className="font-medium text-zinc-100">{connectModalAccount.xHandle}</span>
             </p>
-            <p className="mt-2 text-xs text-zinc-400">
-              Use your already logged-in browser profile. Keep that browser closed for the same profile before
-              launching. If dashboard is open in that browser/profile, open dashboard in another browser first.
-            </p>
 
-            <div className="mt-4 grid gap-3">
-              <label className="text-xs text-zinc-300">
-                Browser
-                <select
-                  value={connectBrowser}
-                  onChange={(event) => setConnectBrowser(event.target.value as "chrome" | "edge")}
-                  className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950/80 p-2 text-xs text-zinc-100 outline-none focus:border-cyan-400"
+            <div className="mt-4 rounded-md border border-lime-500/30 bg-lime-500/10 p-3">
+              <p className="text-sm font-medium text-lime-100">Link with a short code (recommended)</p>
+              <ol className="mt-2 list-decimal space-y-1 pl-5 text-xs text-zinc-300">
+                <li>Open Simcluster’s connect page in a new tab and sign in.</li>
+                <li>Copy the one-time code it shows.</li>
+                <li>Paste the code below and press Connect with code.</li>
+              </ol>
+              <a
+                href="https://simcluster.ai/agent/connect"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="mt-3 inline-flex rounded-md border border-cyan-500/50 bg-cyan-500/15 px-3 py-2 text-xs font-medium text-cyan-100 hover:bg-cyan-500/25"
+              >
+                Open simcluster.ai/agent/connect
+              </a>
+              <label className="mt-3 block text-xs text-zinc-300">
+                One-time code
+                <input
+                  value={connectLinkCode}
+                  onChange={(event) => {
+                    setConnectLinkCode(event.target.value);
+                    setConnectExchangeError(null);
+                  }}
+                  className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950/80 p-2 font-mono text-sm text-zinc-100 outline-none focus:border-cyan-400"
+                  placeholder="Paste the code from Simcluster"
+                  autoComplete="off"
+                />
+              </label>
+              {connectExchangeError ? (
+                <p className="mt-2 text-xs text-rose-300">{connectExchangeError}</p>
+              ) : null}
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Button
+                  disabled={isExchangingLink || !connectLinkCode.trim()}
+                  onClick={async () => {
+                    setIsExchangingLink(true);
+                    setConnectExchangeError(null);
+                    try {
+                      const response = await fetch("/api/accounts/connect/exchange-code", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                          accountId: connectModalAccount.id,
+                          code: connectLinkCode.trim(),
+                        }),
+                      });
+                      const payload = (await response.json()) as { ok?: boolean; message?: string };
+                      if (!response.ok || !payload.ok) {
+                        setConnectExchangeError(payload.message ?? "Could not link this code.");
+                        return;
+                      }
+                      const refresh = await fetch("/api/accounts", { cache: "no-store" });
+                      if (refresh.ok) {
+                        const list = (await refresh.json()) as SimclusterAccount[];
+                        setAccounts(list);
+                      }
+                      toast.success(payload.message ?? "Account linked.");
+                      setConnectModalAccountId(null);
+                      setConnectLinkCode("");
+                    } catch {
+                      setConnectExchangeError("Something went wrong. Try again.");
+                    } finally {
+                      setIsExchangingLink(false);
+                    }
+                  }}
                 >
-                  <option value="chrome">Google Chrome</option>
-                  <option value="edge">Microsoft Edge</option>
-                </select>
-              </label>
-              <label className="text-xs text-zinc-300">
-                User Data path
-                <input
-                  value={profilePath}
-                  onChange={(event) => setProfilePath(event.target.value)}
-                  className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950/80 p-2 text-xs text-zinc-100 outline-none focus:border-cyan-400"
-                />
-              </label>
-              <label className="text-xs text-zinc-300">
-                Profile directory (Default, Profile 1, Profile 2, ...)
-                <input
-                  value={profileDirectory}
-                  onChange={(event) => setProfileDirectory(event.target.value)}
-                  className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950/80 p-2 text-xs text-zinc-100 outline-none focus:border-cyan-400"
-                />
-              </label>
+                  {isExchangingLink ? "Connecting…" : "Connect with code"}
+                </Button>
+              </div>
             </div>
 
-            {connectStatus ? (
-              <p
-                className={`mt-3 text-xs ${
-                  connectStatus.state === "connected"
-                    ? "text-lime-300"
-                    : connectStatus.state === "failed"
-                      ? "text-rose-300"
-                      : "text-cyan-300"
-                }`}
-              >
-                {connectStatus.message}
-              </p>
-            ) : null}
+            <details className="mt-5 rounded-md border border-zinc-700 bg-zinc-950/50 p-3">
+              <summary className="cursor-pointer text-xs font-medium text-zinc-400">
+                Advanced — Chrome profile (only if this app runs on your own Windows/Mac)
+              </summary>
+              {!connectInteractiveAvailable ? (
+                <p className="mt-2 text-xs text-amber-200">
+                  Hidden Chrome launch is not available on cloud hosting. Use the link code above, or the Cookies
+                  button for manual cookie JSON.
+                </p>
+              ) : (
+                <div className="mt-3 space-y-3">
+                  <p className="text-xs text-zinc-400">
+                    Launches Chrome/Edge on the same computer that is running the farmer app. Close that browser
+                    profile first.
+                  </p>
+                  <label className="text-xs text-zinc-300">
+                    Browser
+                    <select
+                      value={connectBrowser}
+                      onChange={(event) => setConnectBrowser(event.target.value as "chrome" | "edge")}
+                      className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950/80 p-2 text-xs text-zinc-100 outline-none focus:border-cyan-400"
+                    >
+                      <option value="chrome">Google Chrome</option>
+                      <option value="edge">Microsoft Edge</option>
+                    </select>
+                  </label>
+                  <label className="text-xs text-zinc-300">
+                    User Data path
+                    <input
+                      value={profilePath}
+                      onChange={(event) => setProfilePath(event.target.value)}
+                      className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950/80 p-2 text-xs text-zinc-100 outline-none focus:border-cyan-400"
+                    />
+                  </label>
+                  <label className="text-xs text-zinc-300">
+                    Profile directory (Default, Profile 1, …)
+                    <input
+                      value={profileDirectory}
+                      onChange={(event) => setProfileDirectory(event.target.value)}
+                      className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950/80 p-2 text-xs text-zinc-100 outline-none focus:border-cyan-400"
+                    />
+                  </label>
+                  {connectStatus ? (
+                    <p
+                      className={`text-xs ${
+                        connectStatus.state === "connected"
+                          ? "text-lime-300"
+                          : connectStatus.state === "failed"
+                            ? "text-rose-300"
+                            : "text-cyan-300"
+                      }`}
+                    >
+                      {connectStatus.message}
+                    </p>
+                  ) : null}
+                  <Button
+                    size="sm"
+                    disabled={isConnectStarting || !profilePath.trim()}
+                    onClick={async () => {
+                      setIsConnectStarting(true);
+                      try {
+                        const response = await fetch("/api/accounts/connect/start", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({
+                            accountId: connectModalAccount.id,
+                            xHandle: connectModalAccount.xHandle,
+                            profilePath: profilePath.trim(),
+                            profileDirectory: profileDirectory.trim() || "Default",
+                            browser: connectBrowser,
+                            interactive: true,
+                          }),
+                        });
+                        if (!response.ok) {
+                          toast.error("Could not start connect flow.");
+                        } else {
+                          toast.success("Connect flow started. Complete login in the opened window.");
+                        }
+                      } finally {
+                        setIsConnectStarting(false);
+                      }
+                    }}
+                  >
+                    {isConnectStarting ? "Starting…" : "Launch Chrome profile"}
+                  </Button>
+                </div>
+              )}
+            </details>
 
-            <div className="mt-4 flex flex-wrap gap-2">
-              <Button
-                disabled={isConnectStarting || !profilePath.trim()}
-                onClick={async () => {
-                  setIsConnectStarting(true);
-                  try {
-                    const response = await fetch("/api/accounts/connect/start", {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({
-                        accountId: connectModalAccount.id,
-                        xHandle: connectModalAccount.xHandle,
-                        profilePath: profilePath.trim(),
-                        profileDirectory: profileDirectory.trim() || "Default",
-                        browser: connectBrowser,
-                        interactive: true,
-                      }),
-                    });
-                    if (!response.ok) {
-                      toast.error("Could not start connect flow.");
-                    } else {
-                      toast.success("Connect flow started. Complete login in opened profile window.");
-                    }
-                  } finally {
-                    setIsConnectStarting(false);
-                  }
-                }}
-              >
-                {isConnectStarting ? "Starting..." : "Launch Connect Flow"}
-              </Button>
+            <div className="mt-4 flex justify-end">
               <Button variant="outline" onClick={() => setConnectModalAccountId(null)}>
                 Close
               </Button>

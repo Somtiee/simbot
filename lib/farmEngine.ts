@@ -419,7 +419,15 @@ export async function farmAllAccounts(headed: boolean = false) {
 
     try {
       const browser = await chromium.launch({ headless: !headed, slowMo: headed ? 90 : 0 });
-      context = await browser.newContext();
+      const token = typeof account.agentSessionToken === "string" ? account.agentSessionToken.trim() : "";
+      const extraHTTPHeaders =
+        token.length > 0
+          ? {
+              Authorization: `Bearer ${token}`,
+              "X-Simcluster-Token": token,
+            }
+          : undefined;
+      context = await browser.newContext(extraHTTPHeaders ? { extraHTTPHeaders } : undefined);
 
       if (Array.isArray(account.cookies) && account.cookies.length > 0) {
         await context.addCookies(account.cookies as Cookie[]);
