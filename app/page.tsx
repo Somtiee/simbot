@@ -108,21 +108,36 @@ export default function Home() {
   const [isExchangingLink, setIsExchangingLink] = useState(false);
   const [connectExchangeError, setConnectExchangeError] = useState<string | null>(null);
   const [connectInteractiveAvailable, setConnectInteractiveAvailable] = useState(true);
+  const [forceHeadless, setForceHeadless] = useState(false);
   const connectedCount = accounts.length;
   const farmingCount = accounts.filter((account) => account.status === "farming").length;
 
   const startFarmRun = useCallback(async () => {
-    const response = await fetch("/api/farm/start", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ headed: headedMode }),
-    });
-    if (response.ok) {
-      toast.success(`Agent farm activated for all ${connectedCount} accounts`);
-    } else {
-      toast.error("Unable to start farm run.");
+    const headed = forceHeadless ? false : headedMode;
+    try {
+      const response = await fetch("/api/farm/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ headed }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as {
+        ok?: boolean;
+        started?: boolean;
+        message?: string;
+      };
+      if (response.status === 409 || payload.started === false) {
+        toast.error(payload.message ?? "Farm did not start (already running or blocked).");
+        return;
+      }
+      if (!response.ok) {
+        toast.error(payload.message ?? "Unable to start farm run.");
+        return;
+      }
+      toast.success(`Agent farm started for ${connectedCount} account(s). Watch the Live Agent Log.`);
+    } catch {
+      toast.error("Network error — could not reach the server.");
     }
-  }, [connectedCount, headedMode]);
+  }, [connectedCount, headedMode, forceHeadless]);
 
   useEffect(() => {
     const poll = async () => {
@@ -158,9 +173,13 @@ export default function Home() {
   useEffect(() => {
     void fetch("/api/runtime", { cache: "no-store" })
       .then((response) => response.json())
-      .then((body: { connectInteractiveAvailable?: boolean }) => {
+      .then((body: { connectInteractiveAvailable?: boolean; forceHeadless?: boolean }) => {
         if (typeof body.connectInteractiveAvailable === "boolean") {
           setConnectInteractiveAvailable(body.connectInteractiveAvailable);
+        }
+        if (body.forceHeadless) {
+          setForceHeadless(true);
+          setHeadedMode(false);
         }
       })
       .catch(() => {
@@ -170,8 +189,6 @@ export default function Home() {
 
   const nextFarmMs = farmStatus.nextFarmAt ? new Date(farmStatus.nextFarmAt).getTime() - cooldownNow : 0;
   const isCooldownActive = nextFarmMs > 0;
-  const buttonDisabled = farmStatus.running || isCooldownActive;
-
   const countdownLabel = useMemo(() => {
     if (!isCooldownActive) return "";
     const totalSeconds = Math.max(0, Math.floor(nextFarmMs / 1000));
@@ -180,6 +197,12 @@ export default function Home() {
     const seconds = totalSeconds % 60;
     return `${hours}h ${minutes}m ${seconds}s`;
   }, [isCooldownActive, nextFarmMs]);
+  const buttonDisabled = farmStatus.running || isCooldownActive;
+  const buttonBlockReason = farmStatus.running
+    ? "A run is in progress (or the lock is stuck — use Clear farm lock)."
+    : isCooldownActive
+      ? `Cooldown active — ${countdownLabel}`
+      : "";
 
   const orderedAccounts = useMemo(() => {
     if (!randomizeOrder) return accounts;
@@ -402,8 +425,9 @@ export default function Home() {
           <Card className="border border-lime-500/25 bg-zinc-900/60">
             <CardContent className="p-6">
               <Button
-                className="h-20 w-full border border-lime-300/60 bg-lime-500/20 text-base font-semibold text-lime-100 shadow-[0_0_40px_rgba(132,204,22,0.35)] hover:bg-lime-500/30"
+                className="h-20 w-full border border-lime-300/60 bg-lime-500/20 text-base font-semibold text-lime-100 shadow-[0_0_40px_rgba(132,204,22,0.35)] hover:bg-lime-500/30 disabled:opacity-50"
                 disabled={buttonDisabled}
+                title={buttonDisabled ? buttonBlockReason : "Start a farm run on the server"}
                 onClick={() => void startFarmRun()}
               >
                 <Sparkles className="mr-2 size-5" />
@@ -417,6 +441,32 @@ export default function Home() {
               {isCooldownActive && !farmStatus.running ? (
                 <p className="mt-2 text-center text-xs text-amber-300">Next farm available in {countdownLabel}</p>
               ) : null}
+              <div className="mt-3 flex flex-wrap items-center justify-center gap-2 text-xs">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 text-amber-200 hover:bg-amber-500/10 hover:text-amber-100"
+                  onClick={async () => {
+                    try {
+                      const r = await fetch("/api/farm/unlock", { method: "POST" });
+                      const p = (await r.json().catch(() => ({}))) as { ok?: boolean };
+                      if (r.ok && p.ok) {
+                        toast.success("Farm lock cleared. Try Activate again.");
+                      } else {
+                        toast.error("Could not clear lock.");
+                      }
+                    } catch {
+                      toast.error("Network error.");
+                    }
+                  }}
+                >
+                  Clear farm lock (stuck button / zombie run)
+                </Button>
+                {forceHeadless ? (
+                  <span className="text-zinc-500">Headed mode is off on cloud (Railway).</span>
+                ) : null}
+              </div>
             </CardContent>
           </Card>
 
@@ -482,8 +532,12 @@ export default function Home() {
             </CardHeader>
             <CardContent className="grid gap-4 sm:grid-cols-2">
               <div className="flex items-center justify-between rounded-md border border-zinc-700 bg-zinc-950/60 p-3">
-                <span className="text-sm">Headed mode</span>
-                <Switch checked={headedMode} onCheckedChange={setHeadedMode} />
+                <span className="text-sm">Headed mode {forceHeadless ? "(cloud: off)" : ""}</span>
+                <Switch
+                  checked={forceHeadless ? false : headedMode}
+                  disabled={forceHeadless}
+                  onCheckedChange={forceHeadless ? undefined : setHeadedMode}
+                />
               </div>
               <div className="flex items-center justify-between rounded-md border border-zinc-700 bg-zinc-950/60 p-3">
                 <span className="text-sm">Randomize order</span>

@@ -8,5 +8,7 @@ export async function GET() {
   return NextResponse.json({
     connectInteractiveAvailable: !onRailway,
     onRailway,
+    /** Headed Playwright needs a display; always false on Railway. */
+    forceHeadless: onRailway,
   });
 }

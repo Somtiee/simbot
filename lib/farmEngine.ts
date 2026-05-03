@@ -34,6 +34,8 @@ type FarmStatus = {
   running: boolean;
   startedAt?: string;
   finishedAt?: string;
+  /** Updated while a run is active; used to detect stuck locks after a crash. */
+  lastFarmHeartbeatAt?: string;
   nextFarmAt?: string;
   totalAccounts: number;
   completedAccounts: number;
@@ -102,7 +104,11 @@ async function appendLog(text: string, tone: LogTone = "info") {
 
 async function patchStatus(patch: Partial<FarmStatus>) {
   const status = await readFarmStatus();
-  await writeFarmStatus({ ...status, ...patch });
+  const next: FarmStatus = { ...status, ...patch };
+  if (next.running) {
+    next.lastFarmHeartbeatAt = nowIso();
+  }
+  await writeFarmStatus(next);
 }
 
 async function humanPause(page: Page, minMs = 1000, maxMs = 4000) {
@@ -353,11 +359,63 @@ function farmedInLast24h(lastFarmed?: string) {
   return Date.now() - last < 24 * 60 * 60 * 1000;
 }
 
-export async function farmAllAccounts(headed: boolean = false) {
-  const existingStatus = await readFarmStatus();
-  if (existingStatus.running) {
-    await appendLog("Farm already running. New launch request ignored.", "warn");
-    return;
+const HEARTBEAT_STALE_MS = 20 * 60 * 1000;
+
+async function tryClearStaleFarmLock(status: FarmStatus): Promise<boolean> {
+  if (!status.running) return true;
+  const beat = status.lastFarmHeartbeatAt ?? status.startedAt;
+  const t = beat ? new Date(beat).getTime() : 0;
+  if (t > 0 && Date.now() - t < HEARTBEAT_STALE_MS) {
+    return false;
+  }
+  await writeFarmStatus({
+    ...status,
+    running: false,
+    logs: [
+      ...status.logs.slice(-59),
+      {
+        ts: nowIso(),
+        text: "Farm lock auto-cleared (stale heartbeat — e.g. server restart or crashed run). You can start again.",
+        tone: "warn",
+      },
+    ],
+  });
+  return true;
+}
+
+/**
+ * Clears a stuck `running` flag (manual recovery). Safe to call anytime.
+ */
+export async function clearFarmRunningLock(): Promise<void> {
+  const s = await readFarmStatus();
+  await writeFarmStatus({
+    ...s,
+    running: false,
+    logs: [
+      ...s.logs.slice(-59),
+      { ts: nowIso(), text: "Farm lock cleared manually. Click Activate to run again.", tone: "info" },
+    ],
+  });
+}
+
+export type FarmStartResult = { ok: true } | { ok: false; message: string };
+
+/**
+ * Validates lock, persists “running”, then kicks off the long-running farm in the background.
+ * Await this for the HTTP response — it returns before accounts finish processing.
+ */
+export async function requestFarmStart(headed: boolean): Promise<FarmStartResult> {
+  let status = await readFarmStatus();
+  if (status.running) {
+    const cleared = await tryClearStaleFarmLock(status);
+    if (!cleared) {
+      return {
+        ok: false,
+        message:
+          "A farm run is already in progress. Wait for it to finish, or click “Clear farm lock” below.",
+      };
+    }
+    status = await readFarmStatus();
   }
 
   const seed = daySeed();
@@ -374,24 +432,45 @@ export async function farmAllAccounts(headed: boolean = false) {
       finishedAt: nowIso(),
       logs: [{ ts: nowIso(), text: "No accounts found in data/accounts.json", tone: "warn" }],
     });
-    return;
+    return { ok: false, message: "No accounts found. Add accounts first." };
   }
 
   const updated = [...allAccounts];
+  const started = nowIso();
   await writeFarmStatus({
     ...defaultStatus(),
     running: true,
-    startedAt: nowIso(),
+    startedAt: started,
+    lastFarmHeartbeatAt: started,
     totalAccounts: rotated.length,
-    logs: [{ ts: nowIso(), text: `Farm started for ${rotated.length} account(s).`, tone: "info" }],
+    logs: [{ ts: started, text: `Farm started for ${rotated.length} account(s).`, tone: "info" }],
   });
 
+  void runFarmAccountsJob(headed, seed, rotated, updated, tasks, totalTasksPerAccount);
+
+  return { ok: true };
+}
+
+/** @deprecated use requestFarmStart — kept for any direct callers */
+export async function farmAllAccounts(headed: boolean = false) {
+  await requestFarmStart(headed);
+}
+
+async function runFarmAccountsJob(
+  headed: boolean,
+  seed: number,
+  rotated: SimclusterAccount[],
+  updated: SimclusterAccount[],
+  tasks: Array<{ name: string; fn: TaskFn }>,
+  totalTasksPerAccount: number,
+) {
+  try {
   for (let accountIndex = 0; accountIndex < rotated.length; accountIndex += 1) {
     const account = rotated[accountIndex];
     const originalIndex = updated.findIndex((a) => a.id === account.id);
     if (originalIndex < 0) continue;
 
-    if (farmedInLast24h(updated[originalIndex].lastFarmed)) {
+    if (isFarmCooldownEnabled() && farmedInLast24h(updated[originalIndex].lastFarmed)) {
       await appendLog(`${account.xHandle} -> skipped (already farmed within last 24h)`, "warn");
       await patchStatus({
         completedAccounts: accountIndex + 1,
@@ -541,4 +620,18 @@ export async function farmAllAccounts(headed: boolean = false) {
       },
     ],
   });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    console.error("[farm] runFarmAccountsJob fatal", error);
+    const s = await readFarmStatus();
+    await writeFarmStatus({
+      ...s,
+      running: false,
+      finishedAt: nowIso(),
+      logs: [
+        ...s.logs.slice(-59),
+        { ts: nowIso(), text: `Farm aborted unexpectedly: ${detail}`, tone: "warn" },
+      ],
+    });
+  }
 }
