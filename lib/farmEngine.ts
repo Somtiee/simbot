@@ -97,16 +97,30 @@ async function launchChromiumWithSelfHeal(headed: boolean): Promise<Browser> {
   const chromium = await getChromium();
   try {
     return await chromium.launch({ headless: !headed, slowMo: headed ? 90 : 0 });
-  } catch (error) {
-    if (isMissingSharedLibraryError(error)) {
-      await ensurePlaywrightSystemDepsInstalled();
-      return chromium.launch({ headless: !headed, slowMo: headed ? 90 : 0 });
-    }
-    if (isMissingPlaywrightExecutableError(error)) {
+  } catch (firstError) {
+    const onRailway = Boolean(process.env.RAILWAY_ENVIRONMENT);
+    if (isMissingPlaywrightExecutableError(firstError)) {
       await ensurePlaywrightBrowsersInstalled();
+    }
+    if (onRailway || isMissingSharedLibraryError(firstError)) {
+      await ensurePlaywrightSystemDepsInstalled();
+    }
+    if (!isMissingPlaywrightExecutableError(firstError)) {
+      // First launch error often wraps root cause as "Target page/context/browser has been closed".
+      // Installing browsers again is cheap compared to hard-failing the whole farm run.
+      await ensurePlaywrightBrowsersInstalled();
+    }
+    try {
+      return await chromium.launch({ headless: !headed, slowMo: headed ? 90 : 0 });
+    } catch (secondError) {
+      if (isMissingPlaywrightExecutableError(secondError)) {
+        await ensurePlaywrightBrowsersInstalled();
+      }
+      if (onRailway || isMissingSharedLibraryError(secondError)) {
+        await ensurePlaywrightSystemDepsInstalled();
+      }
       return chromium.launch({ headless: !headed, slowMo: headed ? 90 : 0 });
     }
-    throw error;
   }
 }
 
