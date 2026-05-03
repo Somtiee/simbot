@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "build:railway": "npx playwright install --with-deps chromium chromium-headless-shell && next build",
+    "build:railway": "PLAYWRIGHT_BROWSERS_PATH=/app/.playwright-browsers npx playwright install --with-deps chromium chromium-headless-shell && next build",
     "start": "next start",
     "lint": "eslint",
     "test:e2e": "playwright test",
@@ -41,3 +41,4 @@
     "typescript": "^5"
   }
 }
+

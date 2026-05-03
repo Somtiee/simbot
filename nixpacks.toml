@@ -4,6 +4,7 @@
 [phases.build]
 # Playwright 1.50+ uses chromium-headless-shell for headless: true (separate from full chromium).
 cmds = [
-  "npx playwright install --with-deps chromium chromium-headless-shell",
+  "PLAYWRIGHT_BROWSERS_PATH=/app/.playwright-browsers npx playwright install --with-deps chromium chromium-headless-shell",
   "npm run build",
 ]
+

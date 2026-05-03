@@ -11,6 +11,10 @@ const ACCOUNTS_FILE = serverPaths.accountsJson();
 const FARM_STATUS_FILE = serverPaths.farmStatusJson();
 const ERROR_SHOTS_DIR = serverPaths.farmErrorShotsDir();
 
+if (process.env.RAILWAY_ENVIRONMENT && !process.env.PLAYWRIGHT_BROWSERS_PATH) {
+  process.env.PLAYWRIGHT_BROWSERS_PATH = "/app/.playwright-browsers";
+}
+
 const SELECTORS = {
   navMissions: [/missions?/i, /quest/i],
   navConcepts: [/concepts?/i],
@@ -635,3 +639,4 @@ async function runFarmAccountsJob(
     });
   }
 }
+
