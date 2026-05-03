@@ -127,8 +127,9 @@ async function launchChromiumWithSelfHeal(headed: boolean): Promise<Browser> {
 const SELECTORS = {
   navMissions: [/missions?/i, /quest/i],
   navConcepts: [/concepts?/i],
-  navStudio: [/create post/i, /studio/i, /post/i],
+  navStudio: [/create post/i, /studio/i, /post/i, /new content/i],
   navBounties: [/bount(y|ies)/i],
+  newContent: [/new content/i, /create post/i, /compose/i],
   newConcept: [/new concept/i, /create concept/i],
   saveConcept: [/save/i, /create/i, /publish/i],
   generateText: [/generate text/i, /ai text/i, /write with ai/i],
@@ -244,9 +245,27 @@ async function safeShot(page: Page, label: string) {
 
 async function clickFirstVisibleByRole(page: Page, names: RegExp[]) {
   for (const name of names) {
-    const locator = page.getByRole("button", { name }).first();
-    if (await locator.isVisible().catch(() => false)) {
-      await locator.click({ timeout: 5000 });
+    const button = page.getByRole("button", { name }).first();
+    if (await button.isVisible().catch(() => false)) {
+      await button.click({ timeout: 5000 }).catch(() => null);
+      return true;
+    }
+
+    const link = page.getByRole("link", { name }).first();
+    if (await link.isVisible().catch(() => false)) {
+      await link.click({ timeout: 5000 }).catch(() => null);
+      return true;
+    }
+
+    const generic = page.locator("button, a, [role='button'], [role='link']").filter({ hasText: name }).first();
+    if (await generic.isVisible().catch(() => false)) {
+      await generic.click({ timeout: 5000 }).catch(() => null);
+      return true;
+    }
+
+    const textTarget = page.getByText(name).first();
+    if (await textTarget.isVisible().catch(() => false)) {
+      await textTarget.click({ timeout: 5000 }).catch(() => null);
       return true;
     }
   }
@@ -297,14 +316,29 @@ async function parseClout(page: Page) {
 }
 
 async function taskDailyCheckIn(page: Page) {
-  await clickFirstVisibleByRole(page, SELECTORS.claim);
+  const openedBonuses = await clickFirstVisibleByRole(page, [/bonuses?/i, /daily/i]);
+  if (openedBonuses) {
+    await humanPause(page);
+  }
+  const claimed = await clickFirstVisibleByRole(page, SELECTORS.claim);
+  if (!claimed) {
+    throw new Error("Daily check-in controls were not found.");
+  }
   await humanPause(page);
-  await clickFirstVisibleByRole(page, [/confirm/i, /ok/i, /claim/i]);
+  await clickFirstVisibleByRole(page, [/confirm/i, /ok/i, /claim/i, /continue/i]);
 }
 
 async function taskMissions(page: Page) {
-  await gotoSection(page, SELECTORS.navMissions);
+  const opened = await gotoSection(page, SELECTORS.navMissions);
+  if (!opened) {
+    throw new Error("Could not open Missions.");
+  }
+  const before = (await page.locator("body").innerText().catch(() => "")) || "";
   await clickAllVisibleClaims(page, 2);
+  const after = (await page.locator("body").innerText().catch(() => "")) || "";
+  if (before === after) {
+    await appendLog("Missions page opened but no claimable items were detected.", "warn");
+  }
 }
 
 async function fillFirstTextbox(page: Page, value: string) {
@@ -317,8 +351,14 @@ async function fillFirstTextbox(page: Page, value: string) {
 }
 
 async function taskCreateConcept(page: Page, _account: SimclusterAccount, seed: number) {
-  await gotoSection(page, SELECTORS.navConcepts);
-  await clickFirstVisibleByRole(page, SELECTORS.newConcept);
+  const opened = (await gotoSection(page, SELECTORS.navConcepts)) || (await clickFirstVisibleByRole(page, SELECTORS.newConcept));
+  if (!opened) {
+    throw new Error("Could not open Concepts.");
+  }
+  const startedConcept = await clickFirstVisibleByRole(page, SELECTORS.newConcept);
+  if (!startedConcept) {
+    throw new Error("Could not start a new concept.");
+  }
   await humanPause(page);
 
   const theme = THEMES[seed % THEMES.length] ?? pick(THEMES);
@@ -335,22 +375,29 @@ async function taskCreateConcept(page: Page, _account: SimclusterAccount, seed: 
   if (await descInput.isVisible().catch(() => false)) await descInput.fill(conceptDesc);
   await humanPause(page);
 
-  await clickFirstVisibleByRole(page, [/generate with ai/i, /ai/i]);
+  await clickFirstVisibleByRole(page, [/generate with ai/i, /ai/i, /generate/i]);
   await humanPause(page);
-  await clickFirstVisibleByRole(page, SELECTORS.saveConcept);
+  const saved = await clickFirstVisibleByRole(page, SELECTORS.saveConcept);
+  if (!saved) {
+    throw new Error("Could not save/create concept.");
+  }
 }
 
 async function taskCreatePost(page: Page, _account: SimclusterAccount, seed: number) {
-  await gotoSection(page, SELECTORS.navStudio);
+  const openedStudio =
+    (await gotoSection(page, SELECTORS.navStudio)) || (await clickFirstVisibleByRole(page, SELECTORS.newContent));
+  if (!openedStudio) {
+    throw new Error("Could not open post composer.");
+  }
   await humanPause(page);
 
   await clickFirstVisibleByRole(page, [/latest concept/i, /select concept/i, /use concept/i]);
   await clickFirstVisibleByRole(page, [/owned/i, /my concepts/i, /random/i]);
   await humanPause(page);
 
-  await clickFirstVisibleByRole(page, SELECTORS.generateText);
+  const generatedText = await clickFirstVisibleByRole(page, SELECTORS.generateText);
   await humanPause(page, 1400, 4200);
-  await clickFirstVisibleByRole(page, SELECTORS.generateImage);
+  const generatedImage = await clickFirstVisibleByRole(page, SELECTORS.generateImage);
   await page.waitForTimeout(rand(6000, 15000));
 
   const dateFlavor = new Date().toLocaleDateString("en-US", {
@@ -364,23 +411,35 @@ async function taskCreatePost(page: Page, _account: SimclusterAccount, seed: num
   if (await textarea.isVisible().catch(() => false)) {
     await textarea.fill(caption);
   } else {
-    await fillFirstTextbox(page, caption);
+    const filled = await fillFirstTextbox(page, caption);
+    if (!filled && !generatedText && !generatedImage) {
+      throw new Error("Post composer inputs were not found.");
+    }
   }
   await humanPause(page);
 
-  await clickFirstVisibleByRole(page, SELECTORS.postButton);
+  const posted = await clickFirstVisibleByRole(page, SELECTORS.postButton);
+  if (!posted) {
+    throw new Error("Could not find Post/Publish button.");
+  }
   await humanPause(page);
   await clickFirstVisibleByRole(page, SELECTORS.exportX);
 }
 
 async function taskBounties(page: Page, _account: SimclusterAccount, seed: number) {
-  await gotoSection(page, SELECTORS.navBounties);
+  const opened = await gotoSection(page, SELECTORS.navBounties);
+  if (!opened) {
+    throw new Error("Could not open Bounties.");
+  }
   await humanPause(page);
 
   const claimed = await clickFirstVisibleByRole(page, [/claim free/i, /claim/i, /low[- ]?cost/i]);
   if (claimed) return;
 
-  await clickFirstVisibleByRole(page, [/new bounty/i, /place bounty/i, /create bounty/i]);
+  const started = await clickFirstVisibleByRole(page, [/new bounty/i, /place bounty/i, /create bounty/i]);
+  if (!started) {
+    throw new Error("No claimable bounty and could not start a new bounty.");
+  }
   await humanPause(page);
 
   const cents = 10 + (seed % 41);
@@ -389,7 +448,10 @@ async function taskBounties(page: Page, _account: SimclusterAccount, seed: numbe
     await bountyInput.fill((cents / 100).toFixed(2));
   }
   await clickFirstVisibleByRole(page, [/own concept/i, /my concept/i, /latest concept/i]);
-  await clickFirstVisibleByRole(page, [/confirm/i, /place/i, /submit/i]);
+  const submitted = await clickFirstVisibleByRole(page, [/confirm/i, /place/i, /submit/i, /create/i]);
+  if (!submitted) {
+    throw new Error("Could not submit bounty.");
+  }
 }
 
 async function taskLightEngagement(page: Page, accounts: SimclusterAccount[]) {
@@ -437,8 +499,10 @@ async function runTask(
     await appendLog(`${account.xHandle} -> ${taskName} -> done`, "success");
   } catch (error) {
     console.error(`[farm] ${account.xHandle} -> ${taskName} -> failed`, error);
-    await appendLog(`${account.xHandle} -> ${taskName} -> failed`, "warn");
+    const detail = error instanceof Error ? error.message : String(error);
+    await appendLog(`${account.xHandle} -> ${taskName} -> failed: ${detail}`, "warn");
     await safeShot(page, `${account.id}-${taskName.replace(/\s+/g, "-").toLowerCase()}-error`).catch(() => null);
+    throw error;
   }
 }
 
