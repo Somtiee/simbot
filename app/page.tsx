@@ -1,65 +1,683 @@
-import Image from "next/image";
+"use client";
+
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Bot, Cookie, Download, ExternalLink, Link2, Plus, Radio, ShieldCheck, Sparkles } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Progress } from "@/components/ui/progress";
+import { Switch } from "@/components/ui/switch";
+import { useFarmStore } from "@/lib/store";
+import type { SimclusterAccount } from "@/types";
+import { toast } from "sonner";
+
+type LogEntry = { text: string; tone: "success" | "warn" | "info" };
+type CookieShape = {
+  name?: string;
+  value?: string;
+  domain?: string;
+  path?: string;
+  expires?: number;
+  httpOnly?: boolean;
+  secure?: boolean;
+  sameSite?: "Strict" | "Lax" | "None";
+};
+
+type FarmStatus = {
+  running: boolean;
+  totalAccounts: number;
+  completedAccounts: number;
+  currentAccountProgress: number;
+  overallProgress: number;
+  currentAccountHandle?: string;
+  nextFarmAt?: string;
+  successMessage?: string;
+  logs: Array<{ ts: string; text: string; tone: "success" | "warn" | "info" }>;
+  accounts?: SimclusterAccount[];
+};
+
+type ConnectStatus = {
+  state: "idle" | "running" | "connected" | "failed";
+  message: string;
+  startedAt?: string;
+  finishedAt?: string;
+  profilePath?: string;
+  profileDirectory?: string;
+};
+
+const statusTone: Record<string, string> = {
+  farming: "text-lime-300",
+  completed: "text-cyan-300",
+  idle: "text-zinc-300",
+  error: "text-rose-300",
+};
+
+const progressFromAccount = (account: SimclusterAccount) => {
+  if (account.status === "completed") return 100;
+  if (account.status === "error") return 22;
+  if (typeof account.cloutEstimate === "number") {
+    return Math.max(15, Math.min(99, account.cloutEstimate % 101));
+  }
+  return account.status === "farming" ? 68 : 40;
+};
 
 export default function Home() {
+  const accounts = useFarmStore((state) => state.accounts);
+  const addAccount = useFarmStore((state) => state.addAccount);
+  const updateAccount = useFarmStore((state) => state.updateAccount);
+  const setAccounts = useFarmStore((state) => state.setAccounts);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [farmStatus, setFarmStatus] = useState<FarmStatus>({
+    running: false,
+    totalAccounts: 0,
+    completedAccounts: 0,
+    currentAccountProgress: 0,
+    overallProgress: 0,
+    logs: [],
+  });
+  const [cooldownNow, setCooldownNow] = useState(() => Date.now());
+
+  const [headedMode, setHeadedMode] = useState(false);
+  const [randomizeOrder, setRandomizeOrder] = useState(true);
+  const [enableImageGeneration, setEnableImageGeneration] = useState(true);
+  const [safeRotation, setSafeRotation] = useState(true);
+  const [crashModalTask, setCrashModalTask] = useState<string | null>(null);
+  const [cookieModalAccountId, setCookieModalAccountId] = useState<string | null>(null);
+  const [cookieJson, setCookieJson] = useState("[]");
+  const [cookieValidation, setCookieValidation] = useState<{ ok: boolean; message: string } | null>(null);
+  const [isCookieTesting, setIsCookieTesting] = useState(false);
+  const [connectModalAccountId, setConnectModalAccountId] = useState<string | null>(null);
+  const [profilePath, setProfilePath] = useState("C:\\Users\\<YOU>\\AppData\\Local\\Google\\Chrome\\User Data");
+  const [profileDirectory, setProfileDirectory] = useState("Default");
+  const [connectBrowser, setConnectBrowser] = useState<"chrome" | "edge">("chrome");
+  const [connectStatus, setConnectStatus] = useState<ConnectStatus | null>(null);
+  const [isConnectStarting, setIsConnectStarting] = useState(false);
+  const connectedCount = accounts.length;
+  const farmingCount = accounts.filter((account) => account.status === "farming").length;
+
+  const startFarmRun = useCallback(async () => {
+    const response = await fetch("/api/farm/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ headed: headedMode }),
+    });
+    if (response.ok) {
+      toast.success(`Agent farm activated for all ${connectedCount} accounts`);
+    } else {
+      toast.error("Unable to start farm run.");
+    }
+  }, [connectedCount, headedMode]);
+
+  useEffect(() => {
+    const poll = async () => {
+      const response = await fetch("/api/farm/status", { cache: "no-store" });
+      if (!response.ok) return;
+      const payload = (await response.json()) as FarmStatus;
+      setFarmStatus(payload);
+      setLogs((payload.logs ?? []).slice(-12).map((item) => ({ text: item.text, tone: item.tone })));
+      const crashLine = [...(payload.logs ?? [])]
+        .reverse()
+        .find((item) => item.tone === "warn" && item.text.includes("failed"));
+      if (crashLine && !payload.running) {
+        setCrashModalTask(crashLine.text);
+      }
+      if (Array.isArray(payload.accounts) && payload.accounts.length > 0) {
+        setAccounts(payload.accounts);
+      }
+    };
+
+    void poll();
+    const timer = setInterval(() => {
+      void poll();
+      setCooldownNow(Date.now());
+    }, 2500);
+
+    return () => clearInterval(timer);
+  }, [setAccounts]);
+
+  const nextFarmMs = farmStatus.nextFarmAt ? new Date(farmStatus.nextFarmAt).getTime() - cooldownNow : 0;
+  const isCooldownActive = nextFarmMs > 0;
+  const buttonDisabled = farmStatus.running || isCooldownActive;
+
+  const countdownLabel = useMemo(() => {
+    if (!isCooldownActive) return "";
+    const totalSeconds = Math.max(0, Math.floor(nextFarmMs / 1000));
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    return `${hours}h ${minutes}m ${seconds}s`;
+  }, [isCooldownActive, nextFarmMs]);
+
+  const orderedAccounts = useMemo(() => {
+    if (!randomizeOrder) return accounts;
+    return [...accounts].sort((a, b) => progressFromAccount(b) - progressFromAccount(a));
+  }, [accounts, randomizeOrder]);
+  const cookieModalAccount = useMemo(
+    () => accounts.find((account) => account.id === cookieModalAccountId) ?? null,
+    [accounts, cookieModalAccountId],
+  );
+  const connectModalAccount = useMemo(
+    () => accounts.find((account) => account.id === connectModalAccountId) ?? null,
+    [accounts, connectModalAccountId],
+  );
+
+  const parsedCookiePayload = useMemo(() => {
+    try {
+      const parsed = JSON.parse(cookieJson) as CookieShape[];
+      if (!Array.isArray(parsed)) return { cookies: [] as CookieShape[], error: "Cookies must be a JSON array." };
+      return { cookies: parsed, error: "" };
+    } catch {
+      return { cookies: [] as CookieShape[], error: "Invalid JSON format." };
+    }
+  }, [cookieJson]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "f") {
+        event.preventDefault();
+        if (!buttonDisabled) {
+          void startFarmRun();
+        }
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [buttonDisabled, startFarmRun]);
+
+  useEffect(() => {
+    if (!connectModalAccountId) return;
+
+    const poll = async () => {
+      const response = await fetch(
+        `/api/accounts/connect/status?accountId=${encodeURIComponent(connectModalAccountId)}`,
+        { cache: "no-store" },
+      );
+      if (!response.ok) return;
+      const payload = (await response.json()) as { ok: boolean; status: ConnectStatus };
+      if (!payload.ok) return;
+      setConnectStatus(payload.status);
+      if (payload.status.state === "connected") {
+        const accountsResponse = await fetch("/api/accounts", { cache: "no-store" });
+        if (accountsResponse.ok) {
+          const refreshed = (await accountsResponse.json()) as SimclusterAccount[];
+          setAccounts(refreshed);
+        }
+      }
+    };
+
+    void poll();
+    const timer = setInterval(() => {
+      void poll();
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [connectModalAccountId, setAccounts]);
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+    <div className="min-h-screen bg-zinc-950 text-zinc-100">
+      <header className="border-b border-lime-500/20 bg-zinc-950/95 px-6 py-4 backdrop-blur">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <Bot className="size-5 text-lime-400" />
+            <h1 className="text-lg font-semibold tracking-wide">
+              Simcluster Agent Farmer • {connectedCount} Accounts
+            </h1>
+            <Badge className="border border-lime-400/50 bg-lime-500/20 text-lime-200">
+              Invite-Only Alpha
+            </Badge>
+            <Badge className="border border-fuchsia-500/40 bg-fuchsia-500/20 text-fuchsia-200">
+              Agent Intelligence v2
+            </Badge>
+          </div>
+          <Badge variant="secondary" className="border border-cyan-400/50 bg-cyan-500/15 text-cyan-200">
+            {connectedCount} Accounts Connected
+          </Badge>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+      </header>
+
+      <div className="grid min-h-[calc(100vh-73px)] lg:grid-cols-[340px_1fr]">
+        <aside className="flex max-h-[calc(100vh-73px)] flex-col border-r border-lime-500/20 bg-zinc-900/50 p-4">
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="text-sm font-medium text-zinc-300">Account Cluster</h2>
+            <Badge className="bg-lime-500/20 text-lime-200">{orderedAccounts.length} live</Badge>
+          </div>
+          <div className="space-y-3 overflow-y-auto pr-1">
+            {orderedAccounts.map((account) => (
+              <Card key={account.id} className="border border-lime-500/20 bg-zinc-900/70">
+                <CardContent className="space-y-3 p-3">
+                  <div className="flex items-center justify-between">
+                    <p className="font-medium">{account.xHandle}</p>
+                    <div
+                      className="grid size-9 place-items-center rounded-full border border-lime-500/30 text-[10px] font-semibold"
+                      style={{
+                        background: `conic-gradient(#84cc16 ${progressFromAccount(account) * 3.6}deg, #27272a 0deg)`,
+                      }}
+                    >
+                      <span className="grid size-7 place-items-center rounded-full bg-zinc-950">
+                        {progressFromAccount(account)}%
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between text-xs">
+                    <span className={`${statusTone[account.status]} capitalize`}>{account.status}</span>
+                    <span className="text-zinc-400">Last farmed {account.lastFarmed ?? "never"}</span>
+                  </div>
+                  <div className="text-[11px]">
+                    {Array.isArray(account.cookies) && account.cookies.length > 0 ? (
+                      <span className="text-lime-300">Session: Connected</span>
+                    ) : (
+                      <span className="text-amber-300">Session: Not connected</span>
+                    )}
+                  </div>
+
+                  <div className="flex gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 border-cyan-500/40 text-xs text-cyan-200"
+                      onClick={() => {
+                        setConnectModalAccountId(account.id);
+                        setConnectStatus(null);
+                      }}
+                    >
+                      <Link2 className="mr-1 size-3" />
+                      Connect Account
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 border-lime-500/40 text-xs"
+                      onClick={() => {
+                        setCookieModalAccountId(account.id);
+                        setCookieJson(JSON.stringify(account.cookies ?? [], null, 2));
+                        setCookieValidation(null);
+                      }}
+                    >
+                      <Cookie className="mr-1 size-3" />
+                      Re-export cookies
+                    </Button>
+                    <Button size="sm" variant="ghost" className="h-7 text-xs text-cyan-200">
+                      <ExternalLink className="mr-1 size-3" />
+                      View last post
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+          <Button
+            variant="outline"
+            className="mt-3 border-lime-500/40 bg-zinc-950/70 text-lime-200 hover:bg-lime-500/10"
+            onClick={() => {
+              const nextNumber = connectedCount + 1;
+              addAccount({
+                id: `acct-${Date.now()}`,
+                xHandle: `@new_account_${nextNumber}`,
+                cookies: [],
+                status: "idle",
+                lastFarmed: "never",
+                cloutEstimate: 0,
+              });
+              toast.success(`Account ${nextNumber} added`);
+            }}
           >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
+            <Plus className="mr-2 size-4" />
+            Add New Account
+          </Button>
+        </aside>
+
+        <main className="space-y-5 p-6">
+          {!farmStatus.running && farmStatus.successMessage ? (
+            <Card className="border border-lime-400/50 bg-lime-500/10 shadow-[0_0_40px_rgba(132,204,22,0.25)]">
+              <CardContent className="p-6 text-center">
+                <p className="text-lg font-semibold text-lime-200">
+                  ✅ AGENT FARM COMPLETE — ALL 9 ACCOUNTS AT MAX DAILY CLOUT + NEW AI POSTS & IMAGES GENERATED
+                </p>
+                {isCooldownActive ? (
+                  <p className="mt-2 text-sm text-lime-100">Next farm available in {countdownLabel}</p>
+                ) : null}
+              </CardContent>
+            </Card>
+          ) : null}
+
+          <Card className="border border-lime-500/25 bg-zinc-900/60">
+            <CardContent className="p-6">
+              <Button
+                className="h-20 w-full border border-lime-300/60 bg-lime-500/20 text-base font-semibold text-lime-100 shadow-[0_0_40px_rgba(132,204,22,0.35)] hover:bg-lime-500/30"
+                disabled={buttonDisabled}
+                onClick={() => void startFarmRun()}
+              >
+                <Sparkles className="mr-2 size-5" />
+                {farmStatus.running
+                  ? "🚀 AGENT FARM RUNNING..."
+                  : "🚀 ACTIVATE AGENT FARM — MAX CLOUT FOR ALL CONNECTED ACCOUNTS"}
+              </Button>
+              <p className="mt-3 text-center text-sm text-zinc-300">
+                Farming {farmingCount} of {connectedCount} accounts
+              </p>
+              {isCooldownActive && !farmStatus.running ? (
+                <p className="mt-2 text-center text-xs text-amber-300">Next farm available in {countdownLabel}</p>
+              ) : null}
+            </CardContent>
+          </Card>
+
+          <Card className="border border-lime-500/25 bg-zinc-900/60">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base">Agent Runtime Progress</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div>
+                <div className="mb-1 flex items-center justify-between text-xs text-zinc-300">
+                  <span>
+                    Current account {farmStatus.currentAccountHandle ? `(${farmStatus.currentAccountHandle})` : ""}
+                  </span>
+                  <span>{farmStatus.currentAccountProgress}%</span>
+                </div>
+                <Progress value={farmStatus.currentAccountProgress} />
+              </div>
+              <div>
+                <div className="mb-1 flex items-center justify-between text-xs text-zinc-300">
+                  <span>
+                    Overall progress ({farmStatus.completedAccounts}/{farmStatus.totalAccounts || connectedCount}{" "}
+                    accounts)
+                  </span>
+                  <span>{farmStatus.overallProgress}%</span>
+                </div>
+                <Progress value={farmStatus.overallProgress} />
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="border border-cyan-500/30 bg-zinc-900/60">
+            <CardHeader className="pb-3">
+              <CardTitle className="flex items-center gap-2 text-base">
+                <Radio className="size-4 text-cyan-300" />
+                Live Agent Log
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-2 font-mono text-sm">
+              {logs.length === 0 ? (
+                <p className="text-zinc-500">Waiting for live agent events...</p>
+              ) : (
+                logs.map((entry, index) => (
+                <p
+                  key={`${entry.text}-${index}`}
+                  className={
+                    entry.tone === "success"
+                      ? "text-lime-300"
+                      : entry.tone === "warn"
+                        ? "text-amber-300"
+                        : "text-cyan-300"
+                  }
+                >
+                  {entry.text}
+                </p>
+                ))
+              )}
+            </CardContent>
+          </Card>
+
+          <Card className="border border-lime-500/20 bg-zinc-900/60">
+            <CardHeader>
+              <CardTitle className="text-base">Agent Runtime Toggles</CardTitle>
+            </CardHeader>
+            <CardContent className="grid gap-4 sm:grid-cols-2">
+              <div className="flex items-center justify-between rounded-md border border-zinc-700 bg-zinc-950/60 p-3">
+                <span className="text-sm">Headed mode</span>
+                <Switch checked={headedMode} onCheckedChange={setHeadedMode} />
+              </div>
+              <div className="flex items-center justify-between rounded-md border border-zinc-700 bg-zinc-950/60 p-3">
+                <span className="text-sm">Randomize order</span>
+                <Switch checked={randomizeOrder} onCheckedChange={setRandomizeOrder} />
+              </div>
+              <div className="flex items-center justify-between rounded-md border border-zinc-700 bg-zinc-950/60 p-3">
+                <span className="text-sm">Enable Image Generation</span>
+                <Switch checked={enableImageGeneration} onCheckedChange={setEnableImageGeneration} />
+              </div>
+              <div className="flex items-center justify-between rounded-md border border-zinc-700 bg-zinc-950/60 p-3">
+                <span className="text-sm">Safe Cross-Account Rotation</span>
+                <Switch checked={safeRotation} onCheckedChange={setSafeRotation} />
+              </div>
+              <Button
+                variant="outline"
+                className="border-cyan-500/40 bg-zinc-950/60 text-cyan-200 hover:bg-cyan-500/10"
+                onClick={async () => {
+                  const response = await fetch("/api/config/export");
+                  if (!response.ok) {
+                    toast.error("Backup export failed.");
+                    return;
+                  }
+                  const payload = (await response.json()) as unknown;
+                  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+                  const url = URL.createObjectURL(blob);
+                  const anchor = document.createElement("a");
+                  anchor.href = url;
+                  anchor.download = `simcluster-backup-${new Date().toISOString().slice(0, 10)}.json`;
+                  anchor.click();
+                  URL.revokeObjectURL(url);
+                  toast.success("Backup exported.");
+                }}
+              >
+                <Download className="mr-2 size-4" />
+                Full Backup / Export Config
+              </Button>
+            </CardContent>
+          </Card>
+
+          <details className="rounded-lg border border-cyan-500/30 bg-zinc-900/60 p-4">
+            <summary className="cursor-pointer list-none text-sm font-semibold text-cyan-200">
+              <span className="inline-flex items-center gap-2">
+                <ShieldCheck className="size-4" />
+                Agent Intelligence Explained
+              </span>
+            </summary>
+            <div className="mt-4 space-y-4 text-sm text-zinc-300">
+              <p>
+                The agent prioritizes daily check-ins, rotates premium tasks by seed, and enforces cooldown windows to
+                reduce account-linking risk while maximizing clout cadence.
+              </p>
+              <div className="rounded-md border border-zinc-700 bg-zinc-950/70 p-3">
+                <p className="mb-2 font-medium text-zinc-100">Cookie export guide</p>
+                <ol className="list-decimal space-y-1 pl-5">
+                  <li>Open X in your browser and sign into the target account.</li>
+                  <li>Open DevTools, then Application tab, and inspect Cookies for `x.com`.</li>
+                  <li>Export values (`auth_token`, `ct0`, etc.) in Playwright cookie JSON format.</li>
+                  <li>Use “Re-export cookies” on an account card after each password reset/login challenge.</li>
+                </ol>
+              </div>
+            </div>
+          </details>
+        </main>
+      </div>
+      {crashModalTask ? (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4">
+          <div className="w-full max-w-xl rounded-lg border border-rose-500/40 bg-zinc-900 p-5">
+            <h3 className="text-lg font-semibold text-rose-200">Agent crashed on task X — retry?</h3>
+            <p className="mt-2 text-sm text-zinc-300">{crashModalTask}</p>
+            <div className="mt-4 flex gap-2">
+              <Button
+                onClick={() => {
+                  setCrashModalTask(null);
+                  void startFarmRun();
+                }}
+              >
+                Retry Farm
+              </Button>
+              <Button variant="outline" onClick={() => setCrashModalTask(null)}>
+                Dismiss
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {connectModalAccount ? (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4">
+          <div className="w-full max-w-2xl rounded-lg border border-cyan-500/40 bg-zinc-900 p-5">
+            <h3 className="text-lg font-semibold text-cyan-200">Connect Simcluster Account</h3>
+            <p className="mt-1 text-sm text-zinc-300">
+              Account: <span className="font-medium text-zinc-100">{connectModalAccount.xHandle}</span>
+            </p>
+            <p className="mt-2 text-xs text-zinc-400">
+              Use your already logged-in browser profile. Keep that browser closed for the same profile before
+              launching. If dashboard is open in that browser/profile, open dashboard in another browser first.
+            </p>
+
+            <div className="mt-4 grid gap-3">
+              <label className="text-xs text-zinc-300">
+                Browser
+                <select
+                  value={connectBrowser}
+                  onChange={(event) => setConnectBrowser(event.target.value as "chrome" | "edge")}
+                  className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950/80 p-2 text-xs text-zinc-100 outline-none focus:border-cyan-400"
+                >
+                  <option value="chrome">Google Chrome</option>
+                  <option value="edge">Microsoft Edge</option>
+                </select>
+              </label>
+              <label className="text-xs text-zinc-300">
+                User Data path
+                <input
+                  value={profilePath}
+                  onChange={(event) => setProfilePath(event.target.value)}
+                  className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950/80 p-2 text-xs text-zinc-100 outline-none focus:border-cyan-400"
+                />
+              </label>
+              <label className="text-xs text-zinc-300">
+                Profile directory (Default, Profile 1, Profile 2, ...)
+                <input
+                  value={profileDirectory}
+                  onChange={(event) => setProfileDirectory(event.target.value)}
+                  className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950/80 p-2 text-xs text-zinc-100 outline-none focus:border-cyan-400"
+                />
+              </label>
+            </div>
+
+            {connectStatus ? (
+              <p
+                className={`mt-3 text-xs ${
+                  connectStatus.state === "connected"
+                    ? "text-lime-300"
+                    : connectStatus.state === "failed"
+                      ? "text-rose-300"
+                      : "text-cyan-300"
+                }`}
+              >
+                {connectStatus.message}
+              </p>
+            ) : null}
+
+            <div className="mt-4 flex flex-wrap gap-2">
+              <Button
+                disabled={isConnectStarting || !profilePath.trim()}
+                onClick={async () => {
+                  setIsConnectStarting(true);
+                  try {
+                    const response = await fetch("/api/accounts/connect/start", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        accountId: connectModalAccount.id,
+                        xHandle: connectModalAccount.xHandle,
+                        profilePath: profilePath.trim(),
+                        profileDirectory: profileDirectory.trim() || "Default",
+                        browser: connectBrowser,
+                        interactive: true,
+                      }),
+                    });
+                    if (!response.ok) {
+                      toast.error("Could not start connect flow.");
+                    } else {
+                      toast.success("Connect flow started. Complete login in opened profile window.");
+                    }
+                  } finally {
+                    setIsConnectStarting(false);
+                  }
+                }}
+              >
+                {isConnectStarting ? "Starting..." : "Launch Connect Flow"}
+              </Button>
+              <Button variant="outline" onClick={() => setConnectModalAccountId(null)}>
+                Close
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {cookieModalAccount ? (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4">
+          <div className="w-full max-w-2xl rounded-lg border border-cyan-500/40 bg-zinc-900 p-5">
+            <h3 className="text-lg font-semibold text-cyan-200">Account Cookie Onboarding</h3>
+            <p className="mt-1 text-sm text-zinc-300">
+              Target account: <span className="font-medium text-zinc-100">{cookieModalAccount.xHandle}</span>
+            </p>
+            <p className="mt-2 text-xs text-zinc-400">
+              Paste Playwright cookie JSON, run Test Login, then Save to this account.
+            </p>
+
+            <textarea
+              value={cookieJson}
+              onChange={(event) => {
+                setCookieJson(event.target.value);
+                setCookieValidation(null);
+              }}
+              className="mt-3 min-h-56 w-full rounded-md border border-zinc-700 bg-zinc-950/80 p-3 font-mono text-xs text-zinc-100 outline-none focus:border-cyan-400"
+              placeholder='[{"name":"session","value":"...","domain":".simcluster.ai","path":"/"}]'
             />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+            {parsedCookiePayload.error ? (
+              <p className="mt-2 text-xs text-amber-300">{parsedCookiePayload.error}</p>
+            ) : null}
+
+            {cookieValidation ? (
+              <p className={`mt-2 text-xs ${cookieValidation.ok ? "text-lime-300" : "text-rose-300"}`}>
+                {cookieValidation.message}
+              </p>
+            ) : null}
+
+            <div className="mt-4 flex flex-wrap gap-2">
+              <Button
+                variant="outline"
+                disabled={isCookieTesting || Boolean(parsedCookiePayload.error)}
+                onClick={async () => {
+                  if (parsedCookiePayload.error) return;
+                  setIsCookieTesting(true);
+                  try {
+                    const response = await fetch("/api/cookies/test-login", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ cookies: parsedCookiePayload.cookies }),
+                    });
+                    const payload = (await response.json()) as { ok: boolean; message: string };
+                    setCookieValidation(payload);
+                  } catch {
+                    setCookieValidation({ ok: false, message: "Cookie test failed to run." });
+                  } finally {
+                    setIsCookieTesting(false);
+                  }
+                }}
+              >
+                {isCookieTesting ? "Testing..." : "Test Login"}
+              </Button>
+              <Button
+                disabled={Boolean(parsedCookiePayload.error)}
+                onClick={() => {
+                  if (parsedCookiePayload.error) return;
+                  updateAccount(cookieModalAccount.id, {
+                    cookies: parsedCookiePayload.cookies,
+                    status: "idle",
+                  });
+                  toast.success(`Saved cookies for ${cookieModalAccount.xHandle}`);
+                  setCookieModalAccountId(null);
+                }}
+              >
+                Save Cookies
+              </Button>
+              <Button variant="ghost" onClick={() => setCookieModalAccountId(null)}>
+                Cancel
+              </Button>
+            </div>
+          </div>
         </div>
-      </main>
+      ) : null}
     </div>
   );
 }

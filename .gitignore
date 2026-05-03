@@ -36,6 +36,12 @@ yarn-error.log*
 # vercel
 .vercel
 
+# local agent data (cookies + runtime — never commit)
+/data/accounts.json
+/data/farm-status.json
+/data/connect-status.json
+/artifacts/
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts
