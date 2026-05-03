@@ -1,10 +1,10 @@
 import { promises as fs } from "node:fs";
-import path from "node:path";
 import { NextResponse } from "next/server";
 import { POST_TEMPLATES, SELECTORS, THEMES } from "@/lib/agentConfig";
+import { serverPaths } from "@/lib/serverDataPaths";
 
-const ACCOUNTS_FILE = path.join(process.cwd(), "data", "accounts.json");
-const STATUS_FILE = path.join(process.cwd(), "data", "farm-status.json");
+const ACCOUNTS_FILE = serverPaths.accountsJson();
+const STATUS_FILE = serverPaths.farmStatusJson();
 
 export async function GET() {
   const [accountsRaw, statusRaw] = await Promise.all([

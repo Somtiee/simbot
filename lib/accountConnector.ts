@@ -1,10 +1,11 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { chromium, type Browser, type BrowserContext, type Cookie, type Page } from "playwright";
+import { serverPaths } from "@/lib/serverDataPaths";
 import type { SimclusterAccount } from "@/types";
 
-const ACCOUNTS_FILE = path.join(process.cwd(), "data", "accounts.json");
-const CONNECT_STATUS_FILE = path.join(process.cwd(), "data", "connect-status.json");
+const ACCOUNTS_FILE = serverPaths.accountsJson();
+const CONNECT_STATUS_FILE = serverPaths.connectStatusJson();
 
 type ConnectState = "idle" | "running" | "connected" | "failed";
 

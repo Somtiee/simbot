@@ -1,0 +1,5 @@
+# Railway / Nixpacks: install Playwright browser + OS deps before Next build.
+# Override in Railway UI if you prefer a custom Build Command instead.
+
+[phases.build]
+cmds = ["npx playwright install --with-deps chromium", "npm run build"]

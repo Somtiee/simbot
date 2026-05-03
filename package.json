@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "build:railway": "npx playwright install --with-deps chromium && next build",
     "start": "next start",
     "lint": "eslint",
     "test:e2e": "playwright test",

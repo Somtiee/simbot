@@ -1,10 +1,10 @@
 import { promises as fs } from "node:fs";
-import path from "node:path";
 import { NextResponse } from "next/server";
+import { serverPaths } from "@/lib/serverDataPaths";
 import type { SimclusterAccount } from "@/types";
 
-const STATUS_FILE = path.join(process.cwd(), "data", "farm-status.json");
-const ACCOUNTS_FILE = path.join(process.cwd(), "data", "accounts.json");
+const STATUS_FILE = serverPaths.farmStatusJson();
+const ACCOUNTS_FILE = serverPaths.accountsJson();
 
 export async function GET() {
   try {

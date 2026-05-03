@@ -2,11 +2,12 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { chromium, type BrowserContext, type Cookie, type Locator, type Page } from "playwright";
 import { POST_TEMPLATES, THEMES } from "@/lib/agentConfig";
+import { serverPaths } from "@/lib/serverDataPaths";
 import type { SimclusterAccount } from "@/types";
 
-const ACCOUNTS_FILE = path.join(process.cwd(), "data", "accounts.json");
-const FARM_STATUS_FILE = path.join(process.cwd(), "data", "farm-status.json");
-const ERROR_SHOTS_DIR = path.join(process.cwd(), "artifacts", "farm-errors");
+const ACCOUNTS_FILE = serverPaths.accountsJson();
+const FARM_STATUS_FILE = serverPaths.farmStatusJson();
+const ERROR_SHOTS_DIR = serverPaths.farmErrorShotsDir();
 
 const SELECTORS = {
   navMissions: [/missions?/i, /quest/i],
