@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { chromium, type BrowserContext, type Cookie, type Locator, type Page } from "playwright";
+import type { BrowserContext, Cookie, Locator, Page } from "playwright";
 import { POST_TEMPLATES, THEMES } from "@/lib/agentConfig";
 import { isFarmCooldownEnabled } from "@/lib/farmCooldown";
 import { fetchXHandleForAgentToken, isPlaceholderXHandle } from "@/lib/simclusterProfile";
@@ -13,6 +13,15 @@ const ERROR_SHOTS_DIR = serverPaths.farmErrorShotsDir();
 
 if (process.env.RAILWAY_ENVIRONMENT && !process.env.PLAYWRIGHT_BROWSERS_PATH) {
   process.env.PLAYWRIGHT_BROWSERS_PATH = "/app/.playwright-browsers";
+}
+
+let chromiumLoader: Promise<typeof import("playwright")["chromium"]> | null = null;
+
+async function getChromium() {
+  if (!chromiumLoader) {
+    chromiumLoader = import("playwright").then((m) => m.chromium);
+  }
+  return chromiumLoader;
 }
 
 const SELECTORS = {
@@ -503,6 +512,7 @@ async function runFarmAccountsJob(
     const startedAt = Date.now();
 
     try {
+      const chromium = await getChromium();
       const browser = await chromium.launch({ headless: !headed, slowMo: headed ? 90 : 0 });
       const token = typeof account.agentSessionToken === "string" ? account.agentSessionToken.trim() : "";
       const extraHTTPHeaders =
