@@ -1,5 +1,6 @@
 import { promises as fs } from "node:fs";
 import { NextResponse } from "next/server";
+import { isFarmCooldownEnabled } from "@/lib/farmCooldown";
 import { serverPaths } from "@/lib/serverDataPaths";
 import type { SimclusterAccount } from "@/types";
 
@@ -14,6 +15,9 @@ export async function GET() {
     ]);
 
     const status = JSON.parse(statusRaw) as Record<string, unknown>;
+    if (!isFarmCooldownEnabled() && "nextFarmAt" in status) {
+      delete status.nextFarmAt;
+    }
     const accounts = JSON.parse(accountsRaw) as SimclusterAccount[];
     return NextResponse.json({ ...status, accounts });
   } catch {
