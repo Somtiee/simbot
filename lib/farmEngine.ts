@@ -1,6 +1,8 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import type { BrowserContext, Cookie, Locator, Page } from "playwright";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import type { Browser, BrowserContext, Cookie, Locator, Page } from "playwright";
 import { POST_TEMPLATES, THEMES } from "@/lib/agentConfig";
 import { isFarmCooldownEnabled } from "@/lib/farmCooldown";
 import { fetchXHandleForAgentToken, isPlaceholderXHandle } from "@/lib/simclusterProfile";
@@ -16,12 +18,50 @@ if (process.env.RAILWAY_ENVIRONMENT && !process.env.PLAYWRIGHT_BROWSERS_PATH) {
 }
 
 let chromiumLoader: Promise<typeof import("playwright")["chromium"]> | null = null;
+const execFileAsync = promisify(execFile);
+let browserInstallPromise: Promise<void> | null = null;
 
 async function getChromium() {
   if (!chromiumLoader) {
     chromiumLoader = import("playwright").then((m) => m.chromium);
   }
   return chromiumLoader;
+}
+
+function isMissingPlaywrightExecutableError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /Executable doesn't exist/i.test(message) || /download new browsers/i.test(message);
+}
+
+async function ensurePlaywrightBrowsersInstalled() {
+  if (browserInstallPromise) return browserInstallPromise;
+
+  browserInstallPromise = (async () => {
+    await appendLog("Playwright browser missing -> installing chromium binaries...", "warn");
+    const env = {
+      ...process.env,
+      PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH ?? "/app/.playwright-browsers",
+    };
+    try {
+      await execFileAsync(
+        "npx",
+        ["playwright", "install", "chromium", "chromium-headless-shell"],
+        {
+          env,
+          timeout: 8 * 60 * 1000,
+        },
+      );
+      await appendLog("Playwright browser install complete. Retrying launch...", "info");
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      await appendLog(`Playwright install failed: ${detail}`, "warn");
+      throw error;
+    }
+  })().finally(() => {
+    browserInstallPromise = null;
+  });
+
+  return browserInstallPromise;
 }
 
 const SELECTORS = {
@@ -508,12 +548,19 @@ async function runFarmAccountsJob(
     await appendLog(`${account.xHandle} -> account session started`, "info");
 
     let context: BrowserContext | null = null;
+    let browser: Browser | null = null;
     let page: Page | null = null;
     const startedAt = Date.now();
 
     try {
       const chromium = await getChromium();
-      const browser = await chromium.launch({ headless: !headed, slowMo: headed ? 90 : 0 });
+      try {
+        browser = await chromium.launch({ headless: !headed, slowMo: headed ? 90 : 0 });
+      } catch (error) {
+        if (!isMissingPlaywrightExecutableError(error)) throw error;
+        await ensurePlaywrightBrowsersInstalled();
+        browser = await chromium.launch({ headless: !headed, slowMo: headed ? 90 : 0 });
+      }
       const token = typeof account.agentSessionToken === "string" ? account.agentSessionToken.trim() : "";
       const extraHTTPHeaders =
         token.length > 0
@@ -601,6 +648,7 @@ async function runFarmAccountsJob(
       } catch {
         // best effort cleanup
       }
+      await browser?.close().catch(() => null);
       await patchStatus({
         completedAccounts: accountIndex + 1,
         overallProgress: Math.round(((accountIndex + 1) / rotated.length) * 100),
