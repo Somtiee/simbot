@@ -133,7 +133,11 @@ export default function Home() {
       setLogs((payload.logs ?? []).slice(-12).map((item) => ({ text: item.text, tone: item.tone })));
       const crashLine = [...(payload.logs ?? [])]
         .reverse()
-        .find((item) => item.tone === "warn" && item.text.includes("failed"));
+        .find(
+          (item) =>
+            item.tone === "warn" &&
+            (/farm stopped:/i.test(item.text) || /moved to next account/i.test(item.text)),
+        );
       if (crashLine && !payload.running) {
         setCrashModalTask(crashLine.text);
       }
@@ -274,7 +278,9 @@ export default function Home() {
               <Card key={account.id} className="border border-lime-500/20 bg-zinc-900/70">
                 <CardContent className="space-y-3 p-3">
                   <div className="flex items-center justify-between">
-                    <p className="font-medium">{account.xHandle}</p>
+                    <p className="font-medium" title={account.xHandle}>
+                      {account.xHandle.startsWith("@") ? account.xHandle : `@${account.xHandle}`}
+                    </p>
                     <div
                       className="grid size-9 place-items-center rounded-full border border-lime-500/30 text-[10px] font-semibold"
                       style={{
@@ -300,7 +306,7 @@ export default function Home() {
                     )}
                   </div>
 
-                  <div className="flex flex-wrap gap-2">
+                  <div className="grid grid-cols-2 gap-2">
                     <Button
                       size="sm"
                       variant="outline"
@@ -545,8 +551,14 @@ export default function Home() {
       {crashModalTask ? (
         <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4">
           <div className="w-full max-w-xl rounded-lg border border-rose-500/40 bg-zinc-900 p-5">
-            <h3 className="text-lg font-semibold text-rose-200">Agent crashed on task X — retry?</h3>
-            <p className="mt-2 text-sm text-zinc-300">{crashModalTask}</p>
+            <h3 className="text-lg font-semibold text-rose-200">Farm stopped on an account</h3>
+            <p className="mt-2 text-sm text-zinc-400">
+              Usually a bad or expired session, a timeout, or Simcluster layout changed. Check the Live Agent Log for
+              the full line below.
+            </p>
+            <p className="mt-3 rounded-md border border-zinc-700 bg-zinc-950/80 p-2 font-mono text-xs text-zinc-200">
+              {crashModalTask}
+            </p>
             <div className="mt-4 flex gap-2">
               <Button
                 onClick={() => {

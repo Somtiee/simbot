@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { NextResponse } from "next/server";
 import { exchangeAgentLinkCode } from "@/lib/simclusterExchange";
+import { fetchXHandleForAgentToken, isPlaceholderXHandle } from "@/lib/simclusterProfile";
 import { serverPaths } from "@/lib/serverDataPaths";
 import type { SimclusterAccount } from "@/types";
 
@@ -65,6 +66,16 @@ export async function POST(request: Request) {
       };
     }
     await writeAccounts(accounts);
+
+    const linked = await readAccounts();
+    const j = linked.findIndex((a) => a.id === id);
+    if (j >= 0 && isPlaceholderXHandle(linked[j].xHandle)) {
+      const xh = await fetchXHandleForAgentToken(exchanged.token);
+      if (xh) {
+        linked[j] = { ...linked[j], xHandle: xh };
+        await writeAccounts(linked);
+      }
+    }
 
     return NextResponse.json({
       ok: true,

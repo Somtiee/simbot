@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { chromium, type BrowserContext, type Cookie, type Locator, type Page } from "playwright";
 import { POST_TEMPLATES, THEMES } from "@/lib/agentConfig";
+import { fetchXHandleForAgentToken, isPlaceholderXHandle } from "@/lib/simclusterProfile";
 import { serverPaths } from "@/lib/serverDataPaths";
 import type { SimclusterAccount } from "@/types";
 
@@ -437,15 +438,33 @@ export async function farmAllAccounts(headed: boolean = false) {
       await page.goto("https://simcluster.ai", { waitUntil: "domcontentloaded", timeout: 60000 });
       await humanPause(page);
 
+      const landingUrl = page.url();
+      if (/login|sign-?in|\/auth|\/signup/i.test(landingUrl)) {
+        throw new Error(
+          "Simcluster opened a sign-in page — this session is not valid for the website. Use Connect (link code) or Cookies again.",
+        );
+      }
+
+      let farmAccount: SimclusterAccount = account;
+      if (isPlaceholderXHandle(farmAccount.xHandle) && token) {
+        const xh = await fetchXHandleForAgentToken(token);
+        if (xh) {
+          farmAccount = { ...farmAccount, xHandle: xh };
+          updated[originalIndex] = { ...updated[originalIndex], xHandle: xh };
+          await writeAccounts(updated);
+          await appendLog(`${xh} -> resolved @handle from Simcluster`, "success");
+        }
+      }
+
       for (let taskIndex = 0; taskIndex < tasks.length; taskIndex += 1) {
         const task = tasks[taskIndex];
-        await runTask(page, account, seed, task.name, task.fn);
+        await runTask(page, farmAccount, seed, task.name, task.fn);
         await patchStatus({
           currentAccountProgress: Math.round(((taskIndex + 1) / totalTasksPerAccount) * 100),
         });
       }
 
-      await runTask(page, account, seed, "Light Engagement", async (p) => {
+      await runTask(page, farmAccount, seed, "Light Engagement", async (p) => {
         await taskLightEngagement(p, updated);
       });
       await patchStatus({ currentAccountProgress: 100 });
@@ -459,26 +478,28 @@ export async function farmAllAccounts(headed: boolean = false) {
       const parsedClout = await parseClout(page);
       updated[originalIndex] = {
         ...updated[originalIndex],
+        xHandle: farmAccount.xHandle,
         status: "completed",
         lastFarmed: nowIso(),
         cloutEstimate: parsedClout ?? updated[originalIndex].cloutEstimate,
         dailyRotationSeed: seed,
       };
-      console.log(`[farm] ${account.xHandle} -> completed`);
+      console.log(`[farm] ${farmAccount.xHandle} -> completed`);
       await appendLog(
-        `${account.xHandle} -> completed -> +${updated[originalIndex].cloutEstimate ?? "?"} CLOUT est.`,
+        `${farmAccount.xHandle} -> completed -> +${updated[originalIndex].cloutEstimate ?? "?"} CLOUT est.`,
         "success",
       );
     } catch (error) {
       console.error(`[farm] ${account.xHandle} -> account run failed`, error);
       if (page) await safeShot(page, `${account.id}-account-failure`).catch(() => null);
+      const detail = error instanceof Error ? error.message : String(error);
       updated[originalIndex] = {
         ...updated[originalIndex],
         status: "error",
         lastFarmed: nowIso(),
         dailyRotationSeed: seed,
       };
-      await appendLog(`${account.xHandle} -> failed -> moved to next account`, "warn");
+      await appendLog(`${account.xHandle} -> farm stopped: ${detail}`, "warn");
     } finally {
       await writeAccounts(updated);
       try {
