@@ -20,6 +20,7 @@ if (process.env.RAILWAY_ENVIRONMENT && !process.env.PLAYWRIGHT_BROWSERS_PATH) {
 let chromiumLoader: Promise<typeof import("playwright")["chromium"]> | null = null;
 const execFileAsync = promisify(execFile);
 let browserInstallPromise: Promise<void> | null = null;
+let browserDepsInstallPromise: Promise<void> | null = null;
 
 async function getChromium() {
   if (!chromiumLoader) {
@@ -31,6 +32,34 @@ async function getChromium() {
 function isMissingPlaywrightExecutableError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /Executable doesn't exist/i.test(message) || /download new browsers/i.test(message);
+}
+
+function isMissingSharedLibraryError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /error while loading shared libraries/i.test(message) || /libglib-2\.0\.so\.0/i.test(message);
+}
+
+async function ensurePlaywrightSystemDepsInstalled() {
+  if (browserDepsInstallPromise) return browserDepsInstallPromise;
+
+  browserDepsInstallPromise = (async () => {
+    await appendLog("Playwright system libs missing -> installing runtime deps...", "warn");
+    try {
+      await execFileAsync("npx", ["playwright", "install-deps", "chromium"], {
+        env: process.env,
+        timeout: 10 * 60 * 1000,
+      });
+      await appendLog("Playwright system deps install complete. Retrying launch...", "info");
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      await appendLog(`Playwright system deps install failed: ${detail}`, "warn");
+      throw error;
+    }
+  })().finally(() => {
+    browserDepsInstallPromise = null;
+  });
+
+  return browserDepsInstallPromise;
 }
 
 async function ensurePlaywrightBrowsersInstalled() {
@@ -557,9 +586,15 @@ async function runFarmAccountsJob(
       try {
         browser = await chromium.launch({ headless: !headed, slowMo: headed ? 90 : 0 });
       } catch (error) {
-        if (!isMissingPlaywrightExecutableError(error)) throw error;
-        await ensurePlaywrightBrowsersInstalled();
-        browser = await chromium.launch({ headless: !headed, slowMo: headed ? 90 : 0 });
+        if (isMissingSharedLibraryError(error)) {
+          await ensurePlaywrightSystemDepsInstalled();
+          browser = await chromium.launch({ headless: !headed, slowMo: headed ? 90 : 0 });
+        } else if (isMissingPlaywrightExecutableError(error)) {
+          await ensurePlaywrightBrowsersInstalled();
+          browser = await chromium.launch({ headless: !headed, slowMo: headed ? 90 : 0 });
+        } else {
+          throw error;
+        }
       }
       const token = typeof account.agentSessionToken === "string" ? account.agentSessionToken.trim() : "";
       const extraHTTPHeaders =
