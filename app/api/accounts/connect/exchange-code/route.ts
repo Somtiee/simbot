@@ -27,6 +27,7 @@ export async function POST(request: Request) {
     const body = (await request.json()) as {
       accountId?: string;
       code?: string;
+      xHandle?: string;
     };
     if (!body.accountId?.trim()) {
       return NextResponse.json({ ok: false, message: "accountId is required." }, { status: 400 });
@@ -44,16 +45,25 @@ export async function POST(request: Request) {
     }
 
     const accounts = await readAccounts();
-    const idx = accounts.findIndex((a) => a.id === body.accountId);
-    if (idx < 0) {
-      return NextResponse.json({ ok: false, message: "Account not found." }, { status: 404 });
-    }
+    const id = body.accountId.trim();
+    const idx = accounts.findIndex((a) => a.id === id);
 
-    accounts[idx] = {
-      ...accounts[idx],
-      agentSessionToken: exchanged.token,
-      status: "idle",
-    };
+    if (idx < 0) {
+      const handle = body.xHandle?.trim() || `@${id}`;
+      accounts.push({
+        id,
+        xHandle: handle,
+        cookies: [],
+        status: "idle",
+        agentSessionToken: exchanged.token,
+      });
+    } else {
+      accounts[idx] = {
+        ...accounts[idx],
+        agentSessionToken: exchanged.token,
+        status: "idle",
+      };
+    }
     await writeAccounts(accounts);
 
     return NextResponse.json({

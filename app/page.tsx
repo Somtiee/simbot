@@ -575,8 +575,8 @@ export default function Home() {
               <p className="text-sm font-medium text-lime-100">Link with a short code (recommended)</p>
               <ol className="mt-2 list-decimal space-y-1 pl-5 text-xs text-zinc-300">
                 <li>Open Simcluster’s connect page in a new tab and sign in.</li>
-                <li>Copy the one-time code it shows.</li>
-                <li>Paste the code below and press Connect with code.</li>
+                <li>Copy the one-time code it shows (each code works once and expires quickly).</li>
+                <li>Paste it below right away, then press Connect with code — if it fails, generate a new code and try again.</li>
               </ol>
               <a
                 href="https://simcluster.ai/agent/connect"
@@ -614,6 +614,7 @@ export default function Home() {
                         headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({
                           accountId: connectModalAccount.id,
+                          xHandle: connectModalAccount.xHandle,
                           code: connectLinkCode.trim(),
                         }),
                       });
