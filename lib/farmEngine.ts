@@ -78,7 +78,7 @@ async function ensurePlaywrightBrowsersInstalled() {
         ["playwright", "install", "chromium", "chromium-headless-shell"],
         {
           env,
-          timeout: 8 * 60 * 1000,
+          timeout: 2 * 60 * 1000,
         },
       );
       await appendLog("Playwright browser install complete. Retrying launch...", "info");
@@ -94,10 +94,29 @@ async function ensurePlaywrightBrowsersInstalled() {
   return browserInstallPromise;
 }
 
+async function launchWithPathFallback(chromium: typeof import("playwright")["chromium"], headed: boolean) {
+  try {
+    return await chromium.launch({ headless: !headed, slowMo: headed ? 90 : 0 });
+  } catch (error) {
+    if (!isMissingPlaywrightExecutableError(error) || !process.env.PLAYWRIGHT_BROWSERS_PATH) {
+      throw error;
+    }
+    const pinnedPath = process.env.PLAYWRIGHT_BROWSERS_PATH;
+    await appendLog(`Pinned browser path (${pinnedPath}) failed. Retrying with default Playwright cache...`, "warn");
+    delete process.env.PLAYWRIGHT_BROWSERS_PATH;
+    try {
+      return await chromium.launch({ headless: !headed, slowMo: headed ? 90 : 0 });
+    } catch (fallbackError) {
+      process.env.PLAYWRIGHT_BROWSERS_PATH = pinnedPath;
+      throw fallbackError;
+    }
+  }
+}
+
 async function launchChromiumWithSelfHeal(headed: boolean): Promise<Browser> {
   const chromium = await getChromium();
   try {
-    return await chromium.launch({ headless: !headed, slowMo: headed ? 90 : 0 });
+    return await launchWithPathFallback(chromium, headed);
   } catch (firstError) {
     const onRailway = Boolean(process.env.RAILWAY_ENVIRONMENT);
     if (isMissingPlaywrightExecutableError(firstError)) {
@@ -112,7 +131,7 @@ async function launchChromiumWithSelfHeal(headed: boolean): Promise<Browser> {
       await ensurePlaywrightBrowsersInstalled();
     }
     try {
-      return await chromium.launch({ headless: !headed, slowMo: headed ? 90 : 0 });
+      return await launchWithPathFallback(chromium, headed);
     } catch (secondError) {
       if (isMissingPlaywrightExecutableError(secondError)) {
         await ensurePlaywrightBrowsersInstalled();
@@ -120,7 +139,7 @@ async function launchChromiumWithSelfHeal(headed: boolean): Promise<Browser> {
       if (onRailway || isMissingSharedLibraryError(secondError)) {
         await ensurePlaywrightSystemDepsInstalled();
       }
-      return chromium.launch({ headless: !headed, slowMo: headed ? 90 : 0 });
+      return launchWithPathFallback(chromium, headed);
     }
   }
 }
