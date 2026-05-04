@@ -185,6 +185,7 @@ type TaskDef = { name: string; fn: TaskFn; required: boolean };
 
 type FarmStatus = {
   running: boolean;
+  runId?: string;
   startedAt?: string;
   finishedAt?: string;
   /** Updated while a run is active; used to detect stuck locks after a crash. */
@@ -979,6 +980,7 @@ export async function clearFarmRunningLock(): Promise<void> {
   await writeFarmStatus({
     ...s,
     running: false,
+    runId: `${Date.now()}-unlock`,
     logs: [
       ...s.logs.slice(-59),
       { ts: nowIso(), text: "Farm lock cleared manually. Click Activate to run again.", tone: "info" },
@@ -1033,9 +1035,11 @@ export async function requestFarmStart(
 
   const updated = [...allAccounts];
   const started = nowIso();
+  const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   await writeFarmStatus({
     ...defaultStatus(),
     running: true,
+    runId,
     startedAt: started,
     lastFarmHeartbeatAt: started,
     totalAccounts: squadConfig.enableSquadBountyFlywheel ? rotated.length * 2 : rotated.length,
@@ -1052,7 +1056,7 @@ export async function requestFarmStart(
     ],
   });
 
-  void runFarmAccountsJob(headed, seed, rotated, updated, tasks, totalTasksPerAccount, postsPerAccount, squadConfig);
+  void runFarmAccountsJob(headed, runId, seed, rotated, updated, tasks, totalTasksPerAccount, postsPerAccount, squadConfig);
 
   return { ok: true };
 }
@@ -1064,6 +1068,7 @@ export async function farmAllAccounts(headed: boolean = false) {
 
 async function runFarmAccountsJob(
   headed: boolean,
+  runId: string,
   seed: number,
   rotated: SimclusterAccount[],
   updated: SimclusterAccount[],
@@ -1073,6 +1078,11 @@ async function runFarmAccountsJob(
   squadConfig: SquadFlywheelConfig,
 ) {
   try {
+  const isSuperseded = async () => {
+    const s = await readFarmStatus();
+    return s.runId !== runId || !s.running;
+  };
+
   // One preflight launch prevents "first account fails" while deps are installed.
   const preflight = await launchChromiumWithSelfHeal(false);
   await preflight.close().catch(() => null);
@@ -1084,6 +1094,7 @@ async function runFarmAccountsJob(
   let totalBountiesFarmed = 0;
 
   const processAccount = async (account: SimclusterAccount, phase: "create" | "farm" | "standard") => {
+    if (await isSuperseded()) return;
     const originalIndex = updated.findIndex((a) => a.id === account.id);
     if (originalIndex < 0) return;
 
@@ -1152,6 +1163,7 @@ async function runFarmAccountsJob(
       let completedSteps = 0;
       if (phase !== "farm") {
         for (let taskIndex = 0; taskIndex < tasks.length; taskIndex += 1) {
+          if (await isSuperseded()) return;
           const task = tasks[taskIndex];
           await runTask(page, farmAccount, seed, task.name, task.fn, { required: false });
           completedSteps += 1;
@@ -1202,6 +1214,7 @@ async function runFarmAccountsJob(
       } else {
         let postsCompleted = 0;
         for (let postIndex = 0; postIndex < postsPerAccount; postIndex += 1) {
+          if (await isSuperseded()) return;
           const postOk = await runTask(
             page,
             farmAccount,
@@ -1289,6 +1302,7 @@ async function runFarmAccountsJob(
   if (squadConfig.enableSquadBountyFlywheel) {
     await appendLog(`Squad bounty creation phase started (${squadConfig.bountiesPerAccount}/account).`, "info");
     for (let i = 0; i < rotated.length; i += 1) {
+      if (await isSuperseded()) return;
       await processAccount(rotated[i], "create");
       completedUnits += 1;
       await patchStatus({
@@ -1299,6 +1313,7 @@ async function runFarmAccountsJob(
 
     await appendLog("Squad bounty farming phase started (all accounts farm squad bounties).", "info");
     for (let i = 0; i < rotated.length; i += 1) {
+      if (await isSuperseded()) return;
       await processAccount(rotated[i], "farm");
       completedUnits += 1;
       await patchStatus({
@@ -1308,6 +1323,7 @@ async function runFarmAccountsJob(
     }
   } else {
     for (let i = 0; i < rotated.length; i += 1) {
+      if (await isSuperseded()) return;
       await processAccount(rotated[i], "standard");
       completedUnits += 1;
       await patchStatus({
@@ -1325,6 +1341,7 @@ async function runFarmAccountsJob(
   await writeFarmStatus({
     ...(await readFarmStatus()),
     running: false,
+    runId,
     finishedAt: finishedAt.toISOString(),
     nextFarmAt: nextFarmAtIso,
     currentAccountId: undefined,
@@ -1357,6 +1374,7 @@ async function runFarmAccountsJob(
     await writeFarmStatus({
       ...s,
       running: false,
+      runId,
       finishedAt: nowIso(),
       logs: [
         ...s.logs.slice(-59),
