@@ -521,6 +521,7 @@ async function taskDailyCheckIn(page: Page) {
   if (!openedBonuses) throw new Error("Could not open Bonuses/Daily panel.");
   await humanPause(page, 900, 2000);
   await clickFirstVisibleByRole(page, [/daily sign-?in bonus/i, /daily bonus/i, /streak/i]).catch(() => null);
+  await page.mouse.wheel(0, 900).catch(() => null);
   await humanPause(page, 500, 1100);
   const claimButtons = page
     .locator("button, a, [role='button'], [role='link']")
@@ -1136,7 +1137,10 @@ async function runFarmAccountsJob(
               "X-Simcluster-Token": token,
             }
           : undefined;
-      context = await browser.newContext(extraHTTPHeaders ? { extraHTTPHeaders } : undefined);
+      context = await browser.newContext({
+        viewport: { width: 1600, height: 1000 },
+        ...(extraHTTPHeaders ? { extraHTTPHeaders } : {}),
+      });
       if (Array.isArray(account.cookies) && account.cookies.length > 0) {
         await context.addCookies(account.cookies as Cookie[]);
       }
