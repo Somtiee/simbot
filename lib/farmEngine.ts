@@ -41,6 +41,13 @@ function isMissingSharedLibraryError(error: unknown): boolean {
 }
 
 async function ensurePlaywrightSystemDepsInstalled() {
+  if (process.env.PLAYWRIGHT_RUNTIME_INSTALL_DEPS !== "1") {
+    await appendLog(
+      "Skipping runtime install-deps (set PLAYWRIGHT_RUNTIME_INSTALL_DEPS=1 to enable).",
+      "info",
+    );
+    return;
+  }
   if (browserDepsInstallPromise) return browserDepsInstallPromise;
 
   browserDepsInstallPromise = (async () => {
