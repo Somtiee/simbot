@@ -462,15 +462,36 @@ async function clickAllVisibleClaims(page: Page, retries = 2, labels: RegExp[] =
 }
 
 async function openSectionWithRoutes(page: Page, labels: RegExp[], routes: readonly string[]) {
+  await dismissBlockingOverlays(page);
   if (await gotoSection(page, labels)) return true;
   for (const route of routes) {
     await page.goto(route, { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => null);
     await humanPause(page, 700, 1500);
+    await dismissBlockingOverlays(page);
     if (await gotoSection(page, labels)) return true;
     const landed = page.url();
     if (landed.toLowerCase().startsWith(route.toLowerCase())) return true;
   }
   return false;
+}
+
+async function dismissBlockingOverlays(page: Page) {
+  await page.keyboard.press("Escape").catch(() => null);
+  const closeTargets = page
+    .locator("button, [role='button'], [aria-label], [title]")
+    .filter({ hasText: /close|dismiss|got it|ok/i });
+  const n = await closeTargets.count().catch(() => 0);
+  for (let i = 0; i < Math.min(n, 2); i += 1) {
+    const btn = closeTargets.nth(i);
+    if (await btn.isVisible().catch(() => false)) {
+      await btn.click({ timeout: 2000, force: true }).catch(() => null);
+      await page.waitForTimeout(200).catch(() => null);
+    }
+  }
+  const topRightClose = page.locator("button[aria-label*='close' i], button[title*='close' i]").first();
+  if (await topRightClose.isVisible().catch(() => false)) {
+    await topRightClose.click({ timeout: 2000, force: true }).catch(() => null);
+  }
 }
 
 async function gotoSection(page: Page, labels: RegExp[]) {
@@ -523,6 +544,7 @@ async function taskDailyCheckIn(page: Page) {
   }
   await humanPause(page);
   await clickFirstVisibleByRole(page, [/confirm/i, /ok/i, /claim/i, /continue/i]);
+  await dismissBlockingOverlays(page);
 }
 
 async function taskMissions(page: Page) {
