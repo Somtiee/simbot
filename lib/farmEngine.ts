@@ -416,11 +416,11 @@ async function openPostComposer(page: Page) {
   return false;
 }
 
-async function clickAllVisibleClaims(page: Page, retries = 2) {
+async function clickAllVisibleClaims(page: Page, retries = 2, labels: RegExp[] = SELECTORS.claim) {
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     let clicked = false;
     const candidates: Locator[] = [];
-    for (const label of SELECTORS.claim) {
+    for (const label of labels) {
       candidates.push(page.getByRole("button", { name: label }));
       candidates.push(
         page
@@ -480,28 +480,25 @@ async function taskDailyCheckIn(page: Page) {
   const openedBonuses = await openSectionWithRoutes(page, [/bonuses?/i, /daily bonus/i, /daily sign/i], SECTION_ROUTES.bonuses);
   if (!openedBonuses) throw new Error("Could not open Bonuses/Daily panel.");
   await humanPause(page, 900, 2000);
-  const claimed = await clickFirstVisibleByRole(page, SELECTORS.claim);
-  if (!claimed) {
-    const claimCandidates = [
-      page.locator("button, a, [role='button']").filter({ hasText: /claim\s*\+?\d+\s*[c¢]?/i }).first(),
-      page.getByText(/claim\s*\+?\d+\s*[c¢]?/i).first(),
-      page.locator("div, span").filter({ hasText: /claim\s*\+?\d+\s*[c¢]?/i }).first(),
-    ];
-    let clicked = false;
-    for (const candidate of claimCandidates) {
-      if (await candidate.isVisible().catch(() => false)) {
-        await candidate.click({ timeout: 5000, force: true }).catch(() => null);
-        clicked = true;
-        break;
-      }
+  const claimButtons = page
+    .locator("button, a, [role='button'], [role='link']")
+    .filter({ hasText: /(^claim\b|claim\s*\+?\d+\s*[c¢]?)/i });
+  const claimCount = await claimButtons.count().catch(() => 0);
+  let clicked = false;
+  for (let i = 0; i < Math.min(4, claimCount); i += 1) {
+    const target = claimButtons.nth(i);
+    if (await target.isVisible().catch(() => false)) {
+      await target.click({ timeout: 3000, force: true }).catch(() => null);
+      clicked = true;
+      break;
     }
-    if (!clicked) {
-      const bodyText = (await page.locator("body").innerText().catch(() => "")) || "";
-      if (/expires in 24 hours|already claimed|next reward|streak/i.test(bodyText)) {
-        await appendLog("Daily check-in appears already claimed for this session.", "info");
-      } else {
-        throw new Error("Daily check-in controls were not found.");
-      }
+  }
+  if (!clicked) {
+    const bodyText = (await page.locator("body").innerText().catch(() => "")) || "";
+    if (/expires in 24 hours|already claimed|next reward|streak/i.test(bodyText)) {
+      await appendLog("Daily check-in appears already claimed for this session.", "info");
+    } else {
+      throw new Error("Daily check-in controls were not found.");
     }
   }
   await humanPause(page);
@@ -514,7 +511,7 @@ async function taskMissions(page: Page) {
     throw new Error("Could not open Missions.");
   }
   const before = (await page.locator("body").innerText().catch(() => "")) || "";
-  await clickAllVisibleClaims(page, 2);
+  await clickAllVisibleClaims(page, 2, [/claim/i, /collect/i, /complete/i, /reward/i]);
   const after = (await page.locator("body").innerText().catch(() => "")) || "";
   if (before === after) {
     await appendLog("Missions page opened but no claimable items were detected.", "warn");
