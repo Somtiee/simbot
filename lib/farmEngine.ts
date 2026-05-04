@@ -143,6 +143,7 @@ const SELECTORS = {
 
 type TaskFn = (page: Page, account: SimclusterAccount, seed: number) => Promise<void>;
 type LogTone = "success" | "warn" | "info";
+type TaskDef = { name: string; fn: TaskFn; required: boolean };
 
 type FarmStatus = {
   running: boolean;
@@ -173,6 +174,12 @@ const defaultStatus = (): FarmStatus => ({
   overallProgress: 0,
   logs: [],
 });
+
+function getPostsPerAccountTarget() {
+  const raw = Number(process.env.FARM_POSTS_PER_ACCOUNT ?? 4);
+  if (!Number.isFinite(raw)) return 4;
+  return Math.max(1, Math.min(8, Math.floor(raw)));
+}
 
 function daySeed() {
   const d = new Date();
@@ -490,33 +497,33 @@ async function runTask(
   seed: number,
   taskName: string,
   task: TaskFn,
+  options?: { required?: boolean },
 ) {
+  const required = options?.required ?? true;
   try {
     console.log(`[farm] ${account.xHandle} -> ${taskName} -> start`);
     await appendLog(`${account.xHandle} -> ${taskName} -> start`, "info");
     await task(page, account, seed);
     console.log(`[farm] ${account.xHandle} -> ${taskName} -> done`);
     await appendLog(`${account.xHandle} -> ${taskName} -> done`, "success");
+    return true;
   } catch (error) {
     console.error(`[farm] ${account.xHandle} -> ${taskName} -> failed`, error);
     const detail = error instanceof Error ? error.message : String(error);
     await appendLog(`${account.xHandle} -> ${taskName} -> failed: ${detail}`, "warn");
     await safeShot(page, `${account.id}-${taskName.replace(/\s+/g, "-").toLowerCase()}-error`).catch(() => null);
-    throw error;
+    if (required) throw error;
+    return false;
   }
 }
 
-function rotateTaskList(seed: number): Array<{ name: string; fn: TaskFn }> {
-  const base = [
-    { name: "Daily Check-in", fn: taskDailyCheckIn as TaskFn },
-    { name: "Missions", fn: taskMissions as TaskFn },
-    { name: "Create Concept", fn: taskCreateConcept as TaskFn },
-    { name: "Create Post", fn: taskCreatePost as TaskFn },
-    { name: "Bounties", fn: taskBounties as TaskFn },
+function taskPlanForRun(): TaskDef[] {
+  return [
+    { name: "Daily Check-in", fn: taskDailyCheckIn as TaskFn, required: false },
+    { name: "Missions", fn: taskMissions as TaskFn, required: false },
+    { name: "Bounties", fn: taskBounties as TaskFn, required: false },
+    { name: "Create Concept", fn: taskCreateConcept as TaskFn, required: false },
   ];
-
-  const offset = seed % base.length;
-  return [...base.slice(offset), ...base.slice(0, offset)];
 }
 
 function sortAccountsForDay(accounts: SimclusterAccount[], seed: number) {
@@ -598,8 +605,9 @@ export async function requestFarmStart(headed: boolean): Promise<FarmStartResult
   const seed = daySeed();
   const allAccounts = await readAccounts();
   const rotated = sortAccountsForDay(allAccounts, seed);
-  const tasks = rotateTaskList(seed);
-  const totalTasksPerAccount = tasks.length + 1;
+  const tasks = taskPlanForRun();
+  const postsPerAccount = getPostsPerAccountTarget();
+  const totalTasksPerAccount = tasks.length + postsPerAccount * 2 + 1;
 
   if (rotated.length === 0) {
     console.log("[farm] no accounts found in data/accounts.json");
@@ -620,10 +628,16 @@ export async function requestFarmStart(headed: boolean): Promise<FarmStartResult
     startedAt: started,
     lastFarmHeartbeatAt: started,
     totalAccounts: rotated.length,
-    logs: [{ ts: started, text: `Farm started for ${rotated.length} account(s).`, tone: "info" }],
+    logs: [
+      {
+        ts: started,
+        text: `Farm started for ${rotated.length} account(s), target ${postsPerAccount} post(s) per account.`,
+        tone: "info",
+      },
+    ],
   });
 
-  void runFarmAccountsJob(headed, seed, rotated, updated, tasks, totalTasksPerAccount);
+  void runFarmAccountsJob(headed, seed, rotated, updated, tasks, totalTasksPerAccount, postsPerAccount);
 
   return { ok: true };
 }
@@ -638,8 +652,9 @@ async function runFarmAccountsJob(
   seed: number,
   rotated: SimclusterAccount[],
   updated: SimclusterAccount[],
-  tasks: Array<{ name: string; fn: TaskFn }>,
+  tasks: TaskDef[],
   totalTasksPerAccount: number,
+  postsPerAccount: number,
 ) {
   try {
   // One preflight launch prevents "first account fails" while deps are installed.
@@ -719,17 +734,59 @@ async function runFarmAccountsJob(
         }
       }
 
+      let completedSteps = 0;
       for (let taskIndex = 0; taskIndex < tasks.length; taskIndex += 1) {
         const task = tasks[taskIndex];
-        await runTask(page, farmAccount, seed, task.name, task.fn);
+        await runTask(page, farmAccount, seed, task.name, task.fn, { required: task.required });
+        completedSteps += 1;
         await patchStatus({
-          currentAccountProgress: Math.round(((taskIndex + 1) / totalTasksPerAccount) * 100),
+          currentAccountProgress: Math.round((completedSteps / totalTasksPerAccount) * 100),
         });
       }
 
-      await runTask(page, farmAccount, seed, "Light Engagement", async (p) => {
+      let postsCompleted = 0;
+      for (let postIndex = 0; postIndex < postsPerAccount; postIndex += 1) {
+        const postOk = await runTask(
+          page,
+          farmAccount,
+          seed + postIndex,
+          `Create Post ${postIndex + 1}/${postsPerAccount}`,
+          taskCreatePost as TaskFn,
+          { required: false },
+        );
+        if (postOk) postsCompleted += 1;
+        completedSteps += 1;
+        await patchStatus({
+          currentAccountProgress: Math.round((completedSteps / totalTasksPerAccount) * 100),
+        });
+
+        await runTask(
+          page,
+          farmAccount,
+          seed + 100 + postIndex,
+          `Light Engagement ${postIndex + 1}/${postsPerAccount}`,
+          async (p) => {
+            await taskLightEngagement(p, updated);
+          },
+          { required: false },
+        );
+        completedSteps += 1;
+        await patchStatus({
+          currentAccountProgress: Math.round((completedSteps / totalTasksPerAccount) * 100),
+        });
+      }
+      await appendLog(
+        `${farmAccount.xHandle} -> posting sprint result: ${postsCompleted}/${postsPerAccount} post(s) completed`,
+        postsCompleted > 0 ? "success" : "warn",
+      );
+      if (postsCompleted === 0) {
+        throw new Error("No posts were created for this account.");
+      }
+
+      await runTask(page, farmAccount, seed, "Final Engagement Sweep", async (p) => {
         await taskLightEngagement(p, updated);
-      });
+      }, { required: false });
+      completedSteps += 1;
       await patchStatus({ currentAccountProgress: 100 });
 
       // Keep runtime in the requested window (approx 2-4 minutes).
