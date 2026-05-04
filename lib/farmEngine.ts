@@ -192,7 +192,9 @@ const SELECTORS = {
 };
 
 const SECTION_ROUTES = {
+  // Simcluster routes /bonuses to this surface on mobile; daily rewards live under Bounties → Daily.
   bonuses: [
+    "https://simcluster.ai/bounties?tab=daily",
     "https://simcluster.ai/bonuses",
     "https://simcluster.ai/rewards",
     "https://simcluster.ai/home",
@@ -205,9 +207,11 @@ const SECTION_ROUTES = {
 } as const;
 
 const BONUS_NAV_LABELS = [
+  /^daily$/i,
   /bonuses?/i,
   /daily bonus/i,
   /daily sign/i,
+  /billboard/i,
   /rewards?/i,
   /earn/i,
   /streak/i,
@@ -583,11 +587,75 @@ async function parseClout(page: Page) {
   return Number.isFinite(num) ? num : undefined;
 }
 
+async function ensureDailyBountiesTab(page: Page) {
+  await page
+    .goto("https://simcluster.ai/bounties?tab=daily", { waitUntil: "domcontentloaded", timeout: 25000 })
+    .catch(() => null);
+  await waitForSimclusterApp(page);
+  await dismissBlockingOverlays(page);
+  await humanPause(page, 600, 1400);
+  const dailyTab = page.getByRole("tab", { name: /^daily$/i }).first();
+  if (await dailyTab.isVisible().catch(() => false)) {
+    await dailyTab.click({ timeout: 5000 }).catch(() => null);
+    await humanPause(page, 500, 1100);
+  } else {
+    const dailyChip = page.locator("button, a, [role='tab'], [role='button']").filter({ hasText: /^daily$/i }).first();
+    if (await dailyChip.isVisible().catch(() => false)) {
+      await dailyChip.click({ timeout: 5000 }).catch(() => null);
+      await humanPause(page, 500, 1100);
+    }
+  }
+}
+
+async function tryClickDailyClaimControls(page: Page): Promise<boolean> {
+  const claimLocators = [
+    page.locator("button, a, [role='button'], [role='link']").filter({
+      hasText: /(^claim\b|claim\s+(now|daily|reward)|claim\s*\+?\d+|^collect\b|collect\s+reward|grab\s+(it|reward|bonus)?)/i,
+    }),
+    page.getByRole("button", { name: /claim|collect|grab/i }),
+    page.locator("button, a, [role='button']").filter({ hasText: /\+\s*\d+/ }),
+    page.locator("button, a, [role='button']").filter({ hasText: /¢\s*\+?\d*|\d+\s*¢/ }),
+  ];
+  for (const group of claimLocators) {
+    const n = await group.count().catch(() => 0);
+    for (let i = 0; i < Math.min(10, n); i += 1) {
+      const target = group.nth(i);
+      if (await target.isVisible().catch(() => false)) {
+        const txt = ((await target.innerText().catch(() => "")) || "").toLowerCase();
+        if ((/connect|log out|follow|unfollow|settings|delete/i.test(txt) && !/(claim|collect|grab|bonus|¢)/i.test(txt))) {
+          continue;
+        }
+        await target.click({ timeout: 4000, force: true }).catch(() => null);
+        await humanPause(page);
+        await clickFirstVisibleByRole(page, [/confirm/i, /ok/i, /got it/i, /continue/i]);
+        await dismissBlockingOverlays(page);
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 async function taskDailyCheckIn(page: Page) {
   await waitForSimclusterApp(page);
+  await ensureDailyBountiesTab(page);
+
+  await humanPause(page, 800, 1800);
+  await clickFirstVisibleByRole(page, [/daily sign-?in/i, /sign-?in bonus/i, /billboard/i, /streak/i]).catch(() => null);
+
+  for (let pass = 0; pass < 4; pass += 1) {
+    await page.mouse.wheel(0, pass === 0 ? 400 : 750).catch(() => null);
+    await humanPause(page, 400, 900);
+    if (await tryClickDailyClaimControls(page)) {
+      await appendLog("Daily check-in: clicked a claim/collect control.", "success");
+      return;
+    }
+  }
+
   const openedBonuses = await openSectionWithRoutes(page, [...BONUS_NAV_LABELS], SECTION_ROUTES.bonuses);
   if (!openedBonuses) {
     for (const route of SECTION_ROUTES.bonuses) {
+      if (route.includes("bounties?tab=daily")) continue;
       await page.goto(route, { waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => null);
       await waitForSimclusterApp(page, 25000);
       await dismissBlockingOverlays(page);
@@ -596,41 +664,27 @@ async function taskDailyCheckIn(page: Page) {
       if (body.length > 400) break;
     }
   }
-  await humanPause(page, 900, 2000);
-  await clickFirstVisibleByRole(page, [/daily sign-?in bonus/i, /daily bonus/i, /streak/i, /check-?in/i]).catch(() => null);
+  await humanPause(page, 600, 1200);
   for (let pass = 0; pass < 3; pass += 1) {
-    await page.mouse.wheel(0, pass === 0 ? 900 : 700).catch(() => null);
-    await humanPause(page, 400, 900);
-    const claimLocators = [
-      page.locator("button, a, [role='button'], [role='link'], div, span").filter({
-        hasText: /(^claim\b|claim\s+(now|daily|reward)|claim\s*\+?\d+)/i,
-      }),
-      page.getByRole("button", { name: /claim/i }),
-      page.locator("button, a, [role='button']").filter({ hasText: /\+\s*\d+/ }),
-    ];
-    for (const group of claimLocators) {
-      const n = await group.count().catch(() => 0);
-      for (let i = 0; i < Math.min(6, n); i += 1) {
-        const target = group.nth(i);
-        if (await target.isVisible().catch(() => false)) {
-          const txt = ((await target.innerText().catch(() => "")) || "").toLowerCase();
-          if (/connect|sign in|log out|follow/i.test(txt) && !/claim/i.test(txt)) continue;
-          await target.click({ timeout: 4000, force: true }).catch(() => null);
-          await humanPause(page);
-          await clickFirstVisibleByRole(page, [/confirm/i, /ok/i, /got it/i, /continue/i]);
-          await dismissBlockingOverlays(page);
-          return;
-        }
-      }
+    await page.mouse.wheel(0, 700).catch(() => null);
+    await humanPause(page, 400, 800);
+    if (await tryClickDailyClaimControls(page)) {
+      await appendLog("Daily check-in: clicked a claim control (fallback route).", "success");
+      return;
     }
   }
+
   const bodyText = (await page.locator("body").innerText().catch(() => "")) || "";
-  if (/expires in 24 hours|already claimed|next reward|come back|claimed today|check back/i.test(bodyText)) {
+  if (
+    /expires in 24 hours|already claimed|next reward|come back|claimed today|check back|billboard.*claimed|nothing to claim/i.test(
+      bodyText,
+    )
+  ) {
     await appendLog("Daily check-in appears already claimed (or on cooldown).", "info");
     return;
   }
   await appendLog(
-    "Daily check-in: no claim control matched (Bonuses UI may differ). Continuing farm — claim manually if needed.",
+    "Daily check-in: no claim control matched after /bounties?tab=daily. Continuing farm — claim manually if needed.",
     "warn",
   );
 }
