@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { execFile } from "node:child_process";
@@ -14,8 +15,19 @@ const ACCOUNTS_FILE = serverPaths.accountsJson();
 const FARM_STATUS_FILE = serverPaths.farmStatusJson();
 const ERROR_SHOTS_DIR = serverPaths.farmErrorShotsDir();
 
+/** Docker image installs browsers here; legacy Nixpacks used /app/.playwright-browsers. */
+function defaultPlaywrightBrowsersPath(): string {
+  try {
+    if (existsSync("/ms-playwright")) return "/ms-playwright";
+    if (existsSync("/app/.playwright-browsers")) return "/app/.playwright-browsers";
+  } catch {
+    /* ignore */
+  }
+  return "/ms-playwright";
+}
+
 if (process.env.RAILWAY_ENVIRONMENT && !process.env.PLAYWRIGHT_BROWSERS_PATH) {
-  process.env.PLAYWRIGHT_BROWSERS_PATH = "/app/.playwright-browsers";
+  process.env.PLAYWRIGHT_BROWSERS_PATH = defaultPlaywrightBrowsersPath();
 }
 
 let chromiumLoader: Promise<typeof import("playwright")["chromium"]> | null = null;
@@ -77,7 +89,7 @@ async function ensurePlaywrightBrowsersInstalled() {
     await appendLog("Playwright browser missing -> installing chromium binaries...", "warn");
     const env = {
       ...process.env,
-      PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH ?? "/app/.playwright-browsers",
+      PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH ?? defaultPlaywrightBrowsersPath(),
     };
     try {
       await execFileAsync(
@@ -180,11 +192,28 @@ const SELECTORS = {
 };
 
 const SECTION_ROUTES = {
-  bonuses: ["https://simcluster.ai/bonuses", "https://simcluster.ai"],
+  bonuses: [
+    "https://simcluster.ai/bonuses",
+    "https://simcluster.ai/rewards",
+    "https://simcluster.ai/home",
+    "https://simcluster.ai/earn",
+    "https://simcluster.ai",
+  ],
   bounties: ["https://simcluster.ai/bounties", "https://simcluster.ai"],
   missions: ["https://simcluster.ai/get-delta", "https://simcluster.ai/missions", "https://simcluster.ai"],
   concepts: ["https://simcluster.ai", "https://simcluster.ai/concepts"],
 } as const;
+
+const BONUS_NAV_LABELS = [
+  /bonuses?/i,
+  /daily bonus/i,
+  /daily sign/i,
+  /rewards?/i,
+  /earn/i,
+  /streak/i,
+  /check-?in/i,
+  /free clout/i,
+] as const;
 
 type TaskFn = (page: Page, account: SimclusterAccount, seed: number) => Promise<void>;
 type LogTone = "success" | "warn" | "info";
@@ -469,11 +498,30 @@ async function clickAllVisibleClaims(page: Page, retries = 2, labels: RegExp[] =
   }
 }
 
+/** Simcluster is a SPA; wait until the shell is past the generic loading splash. */
+async function waitForSimclusterApp(page: Page, timeoutMs = 45000) {
+  try {
+    await page.waitForFunction(
+      () => {
+        const t = document.body?.innerText ?? "";
+        if (t.length < 350) return false;
+        if (/simcluster is loading/i.test(t)) return false;
+        return true;
+      },
+      { timeout: timeoutMs },
+    );
+  } catch {
+    /* still try automation — slow networks */
+  }
+  await page.waitForTimeout(400).catch(() => null);
+}
+
 async function openSectionWithRoutes(page: Page, labels: RegExp[], routes: readonly string[]) {
   await dismissBlockingOverlays(page);
   if (await gotoSection(page, labels)) return true;
   for (const route of routes) {
-    await page.goto(route, { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => null);
+    await page.goto(route, { waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => null);
+    await waitForSimclusterApp(page, 30000);
     await humanPause(page, 700, 1500);
     await dismissBlockingOverlays(page);
     if (await gotoSection(page, labels)) return true;
@@ -504,9 +552,21 @@ async function dismissBlockingOverlays(page: Page) {
 
 async function gotoSection(page: Page, labels: RegExp[]) {
   for (const label of labels) {
-    const candidate = page.getByRole("link", { name: label }).first();
-    if (await candidate.isVisible().catch(() => false)) {
-      await candidate.click({ timeout: 5000 });
+    const link = page.getByRole("link", { name: label }).first();
+    if (await link.isVisible().catch(() => false)) {
+      await link.click({ timeout: 5000 });
+      await humanPause(page);
+      return true;
+    }
+    const tab = page.getByRole("tab", { name: label }).first();
+    if (await tab.isVisible().catch(() => false)) {
+      await tab.click({ timeout: 5000 });
+      await humanPause(page);
+      return true;
+    }
+    const menu = page.getByRole("menuitem", { name: label }).first();
+    if (await menu.isVisible().catch(() => false)) {
+      await menu.click({ timeout: 5000 });
       await humanPause(page);
       return true;
     }
@@ -524,36 +584,55 @@ async function parseClout(page: Page) {
 }
 
 async function taskDailyCheckIn(page: Page) {
-  const openedBonuses = await openSectionWithRoutes(page, [/bonuses?/i, /daily bonus/i, /daily sign/i], SECTION_ROUTES.bonuses);
-  if (!openedBonuses) throw new Error("Could not open Bonuses/Daily panel.");
+  await waitForSimclusterApp(page);
+  const openedBonuses = await openSectionWithRoutes(page, [...BONUS_NAV_LABELS], SECTION_ROUTES.bonuses);
+  if (!openedBonuses) {
+    for (const route of SECTION_ROUTES.bonuses) {
+      await page.goto(route, { waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => null);
+      await waitForSimclusterApp(page, 25000);
+      await dismissBlockingOverlays(page);
+      await humanPause(page, 600, 1200);
+      const body = (await page.locator("body").innerText().catch(() => "")) || "";
+      if (body.length > 400) break;
+    }
+  }
   await humanPause(page, 900, 2000);
-  await clickFirstVisibleByRole(page, [/daily sign-?in bonus/i, /daily bonus/i, /streak/i]).catch(() => null);
-  await page.mouse.wheel(0, 900).catch(() => null);
-  await humanPause(page, 500, 1100);
-  const claimButtons = page
-    .locator("button, a, [role='button'], [role='link']")
-    .filter({ hasText: /(^claim\b|claim\s*\+?\d+\s*[c¢]?)/i });
-  const claimCount = await claimButtons.count().catch(() => 0);
-  let clicked = false;
-  for (let i = 0; i < Math.min(4, claimCount); i += 1) {
-    const target = claimButtons.nth(i);
-    if (await target.isVisible().catch(() => false)) {
-      await target.click({ timeout: 3000, force: true }).catch(() => null);
-      clicked = true;
-      break;
+  await clickFirstVisibleByRole(page, [/daily sign-?in bonus/i, /daily bonus/i, /streak/i, /check-?in/i]).catch(() => null);
+  for (let pass = 0; pass < 3; pass += 1) {
+    await page.mouse.wheel(0, pass === 0 ? 900 : 700).catch(() => null);
+    await humanPause(page, 400, 900);
+    const claimLocators = [
+      page.locator("button, a, [role='button'], [role='link'], div, span").filter({
+        hasText: /(^claim\b|claim\s+(now|daily|reward)|claim\s*\+?\d+)/i,
+      }),
+      page.getByRole("button", { name: /claim/i }),
+      page.locator("button, a, [role='button']").filter({ hasText: /\+\s*\d+/ }),
+    ];
+    for (const group of claimLocators) {
+      const n = await group.count().catch(() => 0);
+      for (let i = 0; i < Math.min(6, n); i += 1) {
+        const target = group.nth(i);
+        if (await target.isVisible().catch(() => false)) {
+          const txt = ((await target.innerText().catch(() => "")) || "").toLowerCase();
+          if (/connect|sign in|log out|follow/i.test(txt) && !/claim/i.test(txt)) continue;
+          await target.click({ timeout: 4000, force: true }).catch(() => null);
+          await humanPause(page);
+          await clickFirstVisibleByRole(page, [/confirm/i, /ok/i, /got it/i, /continue/i]);
+          await dismissBlockingOverlays(page);
+          return;
+        }
+      }
     }
   }
-  if (!clicked) {
-    const bodyText = (await page.locator("body").innerText().catch(() => "")) || "";
-    if (/expires in 24 hours|already claimed|next reward|streak/i.test(bodyText)) {
-      await appendLog("Daily check-in appears already claimed for this session.", "info");
-    } else {
-      throw new Error("Daily check-in controls were not found.");
-    }
+  const bodyText = (await page.locator("body").innerText().catch(() => "")) || "";
+  if (/expires in 24 hours|already claimed|next reward|come back|claimed today|check back/i.test(bodyText)) {
+    await appendLog("Daily check-in appears already claimed (or on cooldown).", "info");
+    return;
   }
-  await humanPause(page);
-  await clickFirstVisibleByRole(page, [/confirm/i, /ok/i, /claim/i, /continue/i]);
-  await dismissBlockingOverlays(page);
+  await appendLog(
+    "Daily check-in: no claim control matched (Bonuses UI may differ). Continuing farm — claim manually if needed.",
+    "warn",
+  );
 }
 
 async function taskMissions(page: Page) {
@@ -1154,6 +1233,7 @@ async function runFarmAccountsJob(
 
       page = await context.newPage();
       await page.goto("https://simcluster.ai", { waitUntil: "domcontentloaded", timeout: 60000 });
+      await waitForSimclusterApp(page);
       await humanPause(page);
 
       if (/login|sign-?in|\/auth|\/signup/i.test(page.url())) {
