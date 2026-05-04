@@ -1,55 +1,6 @@
-# Railway / Nixpacks: install Playwright browser + OS deps before Next build.
-# Override in Railway UI if you prefer a custom Build Command instead.
-# v3 — force full image rebuild with complete Chromium shared-lib set
-
-[phases.setup]
-# Full set of shared libraries required by Playwright chromium-headless-shell.
-# libglib2.0-0 is the primary dep that causes "cannot open shared object file"
-# libasound2t64 replaces libasound2 on Ubuntu 24.04 (Noble) — both listed.
-aptPkgs = [
-  "libglib2.0-0",
-  "libnss3",
-  "libnspr4",
-  "libgtk-3-0",
-  "libatk1.0-0",
-  "libatk-bridge2.0-0",
-  "libcups2",
-  "libdrm2",
-  "libdbus-1-3",
-  "libxkbcommon0",
-  "libatspi2.0-0",
-  "libxcomposite1",
-  "libxdamage1",
-  "libxfixes3",
-  "libxrandr2",
-  "libgbm1",
-  "libasound2",
-  "libpangocairo-1.0-0",
-  "libpango-1.0-0",
-  "libcairo2",
-  "libx11-6",
-  "libx11-xcb1",
-  "libxcb1",
-  "libxext6",
-  "libxshmfence1",
-  "libxss1",
-  "libxtst6",
-  "ca-certificates",
-  "fonts-liberation",
-  "libvulkan1",
-  "libgl1-mesa-glx",
-  "libgl1",
-]
-
-[phases.build]
-# Playwright 1.50+ uses chromium-headless-shell for headless: true.
-# PLAYWRIGHT_BROWSERS_PATH must be set so browsers survive to runtime.
-# --with-deps ensures OS packages are installed inside the builder layer too.
-cmds = [
-  "PLAYWRIGHT_BROWSERS_PATH=/app/.playwright-browsers npx playwright install --with-deps chromium chromium-headless-shell",
-  "npm run build",
-]
-
-[phases.start]
-# Ensure PLAYWRIGHT_BROWSERS_PATH matches build-time path at runtime.
-cmd = "PLAYWRIGHT_BROWSERS_PATH=/app/.playwright-browsers npm start"
+# Railway will prefer the Dockerfile in this repo over Nixpacks auto-detection.
+# This file is kept as a fallback reference only — the Dockerfile is the source
+# of truth for the build environment.
+#
+# To use: ensure "Dockerfile" is selected as the build method in Railway's
+# service settings, or Railway will auto-detect it from the Dockerfile present.
