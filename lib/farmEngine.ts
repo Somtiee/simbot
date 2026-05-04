@@ -154,6 +154,13 @@ const SELECTORS = {
   bountyOpenCardButton: [/view/i, /open/i, /details?/i, /farm/i],
 };
 
+const SECTION_ROUTES = {
+  bonuses: ["https://simcluster.ai/bonuses", "https://simcluster.ai"],
+  bounties: ["https://simcluster.ai/bounties", "https://simcluster.ai"],
+  missions: ["https://simcluster.ai/get-delta", "https://simcluster.ai/missions", "https://simcluster.ai"],
+  concepts: ["https://simcluster.ai", "https://simcluster.ai/concepts"],
+} as const;
+
 type TaskFn = (page: Page, account: SimclusterAccount, seed: number) => Promise<void>;
 type LogTone = "success" | "warn" | "info";
 type TaskDef = { name: string; fn: TaskFn; required: boolean };
@@ -415,6 +422,11 @@ async function clickAllVisibleClaims(page: Page, retries = 2) {
     const candidates: Locator[] = [];
     for (const label of SELECTORS.claim) {
       candidates.push(page.getByRole("button", { name: label }));
+      candidates.push(
+        page
+          .locator("button, a, [role='button'], [role='link'], div")
+          .filter({ hasText: label }),
+      );
     }
     for (const group of candidates) {
       const count = await group.count();
@@ -429,6 +441,18 @@ async function clickAllVisibleClaims(page: Page, retries = 2) {
     }
     if (!clicked) break;
   }
+}
+
+async function openSectionWithRoutes(page: Page, labels: RegExp[], routes: readonly string[]) {
+  if (await gotoSection(page, labels)) return true;
+  for (const route of routes) {
+    await page.goto(route, { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => null);
+    await humanPause(page, 700, 1500);
+    if (await gotoSection(page, labels)) return true;
+    const landed = page.url();
+    if (landed.toLowerCase().startsWith(route.toLowerCase())) return true;
+  }
+  return false;
 }
 
 async function gotoSection(page: Page, labels: RegExp[]) {
@@ -453,20 +477,27 @@ async function parseClout(page: Page) {
 }
 
 async function taskDailyCheckIn(page: Page) {
-  const openedBonuses = await clickFirstVisibleByRole(page, [/bonuses?/i, /daily/i]);
-  if (openedBonuses) {
-    await humanPause(page);
-  }
+  const openedBonuses = await openSectionWithRoutes(page, [/bonuses?/i, /daily bonus/i, /daily sign/i], SECTION_ROUTES.bonuses);
+  if (!openedBonuses) throw new Error("Could not open Bonuses/Daily panel.");
+  await humanPause(page, 900, 2000);
   const claimed = await clickFirstVisibleByRole(page, SELECTORS.claim);
   if (!claimed) {
-    throw new Error("Daily check-in controls were not found.");
+    const bonusClaim = page
+      .locator("button, a, [role='button']")
+      .filter({ hasText: /claim\s*\+?\d+/i })
+      .first();
+    if (await bonusClaim.isVisible().catch(() => false)) {
+      await bonusClaim.click({ timeout: 5000 }).catch(() => null);
+    } else {
+      throw new Error("Daily check-in controls were not found.");
+    }
   }
   await humanPause(page);
   await clickFirstVisibleByRole(page, [/confirm/i, /ok/i, /claim/i, /continue/i]);
 }
 
 async function taskMissions(page: Page) {
-  const opened = await gotoSection(page, SELECTORS.navMissions);
+  const opened = await openSectionWithRoutes(page, [...SELECTORS.navMissions, /get delta/i], SECTION_ROUTES.missions);
   if (!opened) {
     throw new Error("Could not open Missions.");
   }
@@ -488,7 +519,9 @@ async function fillFirstTextbox(page: Page, value: string) {
 }
 
 async function taskCreateConcept(page: Page, _account: SimclusterAccount, seed: number) {
-  const opened = (await gotoSection(page, SELECTORS.navConcepts)) || (await clickFirstVisibleByRole(page, SELECTORS.newConcept));
+  const opened =
+    (await openSectionWithRoutes(page, [...SELECTORS.navConcepts, /new concept/i], SECTION_ROUTES.concepts)) ||
+    (await clickFirstVisibleByRole(page, SELECTORS.newConcept));
   if (!opened) {
     throw new Error("Could not open Concepts.");
   }
@@ -568,7 +601,7 @@ async function taskCreatePost(page: Page, _account: SimclusterAccount, seed: num
 }
 
 async function taskBounties(page: Page, _account: SimclusterAccount, seed: number) {
-  const opened = await gotoSection(page, SELECTORS.navBounties);
+  const opened = await openSectionWithRoutes(page, SELECTORS.navBounties, SECTION_ROUTES.bounties);
   if (!opened) {
     throw new Error("Could not open Bounties.");
   }
