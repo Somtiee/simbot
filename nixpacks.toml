@@ -1,9 +1,11 @@
 # Railway / Nixpacks: install Playwright browser + OS deps before Next build.
 # Override in Railway UI if you prefer a custom Build Command instead.
+# v3 — force full image rebuild with complete Chromium shared-lib set
 
 [phases.setup]
-# Ensure runtime has shared libraries required by Playwright headless shell.
-# Ref: https://playwright.dev/docs/ci#requirements and Nixpacks aptPkgs docs.
+# Full set of shared libraries required by Playwright chromium-headless-shell.
+# libglib2.0-0 is the primary dep that causes "cannot open shared object file"
+# libasound2t64 replaces libasound2 on Ubuntu 24.04 (Noble) — both listed.
 aptPkgs = [
   "libglib2.0-0",
   "libnss3",
@@ -34,12 +36,20 @@ aptPkgs = [
   "libxtst6",
   "ca-certificates",
   "fonts-liberation",
+  "libvulkan1",
+  "libgl1-mesa-glx",
+  "libgl1",
 ]
 
 [phases.build]
-# Playwright 1.50+ uses chromium-headless-shell for headless: true (separate from full chromium).
+# Playwright 1.50+ uses chromium-headless-shell for headless: true.
+# PLAYWRIGHT_BROWSERS_PATH must be set so browsers survive to runtime.
+# --with-deps ensures OS packages are installed inside the builder layer too.
 cmds = [
   "PLAYWRIGHT_BROWSERS_PATH=/app/.playwright-browsers npx playwright install --with-deps chromium chromium-headless-shell",
   "npm run build",
 ]
 
+[phases.start]
+# Ensure PLAYWRIGHT_BROWSERS_PATH matches build-time path at runtime.
+cmd = "PLAYWRIGHT_BROWSERS_PATH=/app/.playwright-browsers npm start"
