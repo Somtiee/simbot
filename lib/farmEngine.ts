@@ -690,6 +690,46 @@ async function verifyBountyVisible(page: Page, title: string): Promise<boolean> 
   return hit.isVisible().catch(() => false);
 }
 
+async function openBountyCreateForm(page: Page, account: SimclusterAccount, seed: number): Promise<boolean> {
+  const openFromBounties = async () => {
+    const opened = await clickFirstVisibleByRole(page, SELECTORS.bountyCreateButton);
+    if (opened) return true;
+    const explicitCreate = page
+      .locator("button, a, [role='button'], [role='link']")
+      .filter({ hasText: /create bounty|new bounty|set bounty|place bounty/i })
+      .first();
+    if (await explicitCreate.isVisible().catch(() => false)) {
+      await explicitCreate.click({ timeout: 5000, force: true }).catch(() => null);
+      return true;
+    }
+    return false;
+  };
+
+  if (await openFromBounties()) return true;
+
+  const openedConcepts = await openSectionWithRoutes(
+    page,
+    [...SELECTORS.navConcepts, /new concept/i, /my concepts?/i],
+    SECTION_ROUTES.concepts,
+  );
+  if (openedConcepts) {
+    await humanPause(page, 700, 1400);
+    if (await clickFirstVisibleByRole(page, [/set bounty/i, /create bounty/i, /place bounty/i])) {
+      return true;
+    }
+  }
+
+  // If concept-dependent bounty controls are hidden, bootstrap one concept and retry once.
+  try {
+    await taskCreateConcept(page, account, seed);
+  } catch {
+    // best effort
+  }
+  await openSectionWithRoutes(page, SELECTORS.navBounties, SECTION_ROUTES.bounties).catch(() => false);
+  await humanPause(page, 600, 1200);
+  return openFromBounties();
+}
+
 async function createSquadBounties(
   page: Page,
   account: SimclusterAccount,
@@ -710,17 +750,7 @@ async function createSquadBounties(
   for (let i = 1; i <= count; i += 1) {
     const title = `${SQUAD_BOUNTY_PREFIX}-${cycleDate}-${accountTag}-${String(i).padStart(2, "0")}`;
     await appendLog(`${account.xHandle} -> bounty create start: ${title}`, "info");
-    let openedCreate = await clickFirstVisibleByRole(page, SELECTORS.bountyCreateButton);
-    if (!openedCreate) {
-      const explicitCreate = page
-        .locator("button, a, [role='button'], [role='link']")
-        .filter({ hasText: /create bounty|new bounty|set bounty|place bounty/i })
-        .first();
-      if (await explicitCreate.isVisible().catch(() => false)) {
-        await explicitCreate.click({ timeout: 5000, force: true }).catch(() => null);
-        openedCreate = true;
-      }
-    }
+    const openedCreate = await openBountyCreateForm(page, account, seed + i);
     if (!openedCreate) {
       await appendLog(`${account.xHandle} -> bounty create failed: open form missing`, "warn");
       continue;
