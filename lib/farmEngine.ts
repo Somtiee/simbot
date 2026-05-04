@@ -118,11 +118,10 @@ async function launchChromiumWithSelfHeal(headed: boolean): Promise<Browser> {
   try {
     return await launchWithPathFallback(chromium, headed);
   } catch (firstError) {
-    const onRailway = Boolean(process.env.RAILWAY_ENVIRONMENT);
     if (isMissingPlaywrightExecutableError(firstError)) {
       await ensurePlaywrightBrowsersInstalled();
     }
-    if (onRailway || isMissingSharedLibraryError(firstError)) {
+    if (isMissingSharedLibraryError(firstError)) {
       await ensurePlaywrightSystemDepsInstalled();
     }
     if (!isMissingPlaywrightExecutableError(firstError)) {
@@ -136,7 +135,7 @@ async function launchChromiumWithSelfHeal(headed: boolean): Promise<Browser> {
       if (isMissingPlaywrightExecutableError(secondError)) {
         await ensurePlaywrightBrowsersInstalled();
       }
-      if (onRailway || isMissingSharedLibraryError(secondError)) {
+      if (isMissingSharedLibraryError(secondError)) {
         await ensurePlaywrightSystemDepsInstalled();
       }
       return launchWithPathFallback(chromium, headed);
