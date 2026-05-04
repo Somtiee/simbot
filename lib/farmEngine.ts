@@ -482,13 +482,20 @@ async function taskDailyCheckIn(page: Page) {
   await humanPause(page, 900, 2000);
   const claimed = await clickFirstVisibleByRole(page, SELECTORS.claim);
   if (!claimed) {
-    const bonusClaim = page
-      .locator("button, a, [role='button']")
-      .filter({ hasText: /claim\s*\+?\d+/i })
-      .first();
-    if (await bonusClaim.isVisible().catch(() => false)) {
-      await bonusClaim.click({ timeout: 5000 }).catch(() => null);
-    } else {
+    const claimCandidates = [
+      page.locator("button, a, [role='button']").filter({ hasText: /claim\s*\+?\d+\s*[c¢]?/i }).first(),
+      page.getByText(/claim\s*\+?\d+\s*[c¢]?/i).first(),
+      page.locator("div, span").filter({ hasText: /claim\s*\+?\d+\s*[c¢]?/i }).first(),
+    ];
+    let clicked = false;
+    for (const candidate of claimCandidates) {
+      if (await candidate.isVisible().catch(() => false)) {
+        await candidate.click({ timeout: 5000, force: true }).catch(() => null);
+        clicked = true;
+        break;
+      }
+    }
+    if (!clicked) {
       throw new Error("Daily check-in controls were not found.");
     }
   }
@@ -637,12 +644,11 @@ async function fillFirstVisibleLocator(page: Page, selector: string, value: stri
   return false;
 }
 
-async function ensureBountiesSection(page: Page): Promise<void> {
-  const opened = await gotoSection(page, SELECTORS.navBounties);
-  if (!opened) {
-    throw new Error("Could not open Bounties.");
-  }
+async function ensureBountiesSection(page: Page): Promise<boolean> {
+  const opened = await openSectionWithRoutes(page, SELECTORS.navBounties, SECTION_ROUTES.bounties);
+  if (!opened) return false;
   await humanPause(page, 800, 1800);
+  return true;
 }
 
 function resolveBountyDescription(
@@ -671,7 +677,11 @@ async function createSquadBounties(
   cfg: SquadFlywheelConfig,
   seed: number,
 ): Promise<{ created: number; createdTitles: string[] }> {
-  await ensureBountiesSection(page);
+  const opened = await ensureBountiesSection(page);
+  if (!opened) {
+    await appendLog(`${account.xHandle} -> squad create skipped: could not open bounties section`, "warn");
+    return { created: 0, createdTitles: [] };
+  }
   let created = 0;
   const createdTitles: string[] = [];
   const accountTag = safeHandleTag(account.xHandle);
@@ -720,7 +730,11 @@ async function farmSquadBounties(
   maxTargets: number,
   seed: number,
 ): Promise<{ farmed: number }> {
-  await ensureBountiesSection(page);
+  const opened = await ensureBountiesSection(page);
+  if (!opened) {
+    await appendLog(`${account.xHandle} -> squad farm skipped: could not open bounties section`, "warn");
+    return { farmed: 0 };
+  }
   const searchToken = `${SQUAD_BOUNTY_PREFIX}-${cycleDate}`;
   await fillFirstVisibleLocator(page, SELECTORS.bountySearchInput, searchToken).catch(() => null);
   await humanPause(page, 900, 1800);
@@ -740,7 +754,8 @@ async function farmSquadBounties(
       farmed += 1;
       await appendLog(`${account.xHandle} -> squad bounty farmed #${farmed}`, "success");
     }
-    await ensureBountiesSection(page);
+    const reopened = await ensureBountiesSection(page);
+    if (!reopened) break;
     await fillFirstVisibleLocator(page, SELECTORS.bountySearchInput, searchToken).catch(() => null);
     await humanPause(page, 700, 1400);
   }
