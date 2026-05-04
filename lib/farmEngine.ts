@@ -589,9 +589,12 @@ async function parseClout(page: Page) {
 
 async function ensureDailyBountiesTab(page: Page) {
   await page
-    .goto("https://simcluster.ai/bounties?tab=daily", { waitUntil: "domcontentloaded", timeout: 25000 })
+    .goto("https://simcluster.ai/bounties?tab=daily", { waitUntil: "domcontentloaded", timeout: 30000 })
     .catch(() => null);
+  await page.waitForLoadState("networkidle", { timeout: 25000 }).catch(() => null);
   await waitForSimclusterApp(page);
+  // Challenges / bonus cards hydrate after first paint; give the client bundle time.
+  await page.waitForTimeout(2800).catch(() => null);
   await dismissBlockingOverlays(page);
   await humanPause(page, 600, 1400);
   const dailyTab = page.getByRole("tab", { name: /^daily$/i }).first();
@@ -605,24 +608,31 @@ async function ensureDailyBountiesTab(page: Page) {
       await humanPause(page, 500, 1100);
     }
   }
+  await page.waitForTimeout(1200).catch(() => null);
 }
 
 async function tryClickDailyClaimControls(page: Page): Promise<boolean> {
   const claimLocators = [
+    page.locator('[aria-label*="claim" i], [aria-label*="collect" i], [aria-label*="bonus" i], [aria-label*="daily" i]'),
+    page.locator('[title*="claim" i], [title*="daily" i], [title*="bonus" i]'),
     page.locator("button, a, [role='button'], [role='link']").filter({
-      hasText: /(^claim\b|claim\s+(now|daily|reward)|claim\s*\+?\d+|^collect\b|collect\s+reward|grab\s+(it|reward|bonus)?)/i,
+      hasText:
+        /(^claim\b|claim\s+(now|daily|reward)|claim\s*\+?\d+|^collect\b|collect\s+reward|redeem|grab\s+|^unlock\b|earn\s+now|tap\s+to)/i,
     }),
-    page.getByRole("button", { name: /claim|collect|grab/i }),
+    page.getByRole("button", { name: /claim|collect|grab|redeem|unlock/i }),
     page.locator("button, a, [role='button']").filter({ hasText: /\+\s*\d+/ }),
     page.locator("button, a, [role='button']").filter({ hasText: /¢\s*\+?\d*|\d+\s*¢/ }),
   ];
   for (const group of claimLocators) {
     const n = await group.count().catch(() => 0);
-    for (let i = 0; i < Math.min(10, n); i += 1) {
+    for (let i = 0; i < Math.min(14, n); i += 1) {
       const target = group.nth(i);
       if (await target.isVisible().catch(() => false)) {
         const txt = ((await target.innerText().catch(() => "")) || "").toLowerCase();
-        if ((/connect|log out|follow|unfollow|settings|delete/i.test(txt) && !/(claim|collect|grab|bonus|¢)/i.test(txt))) {
+        if (
+          /connect|log out|follow|unfollow|settings|delete/i.test(txt) &&
+          !/(claim|collect|grab|bonus|¢|redeem|daily)/i.test(txt)
+        ) {
           continue;
         }
         await target.click({ timeout: 4000, force: true }).catch(() => null);
@@ -636,9 +646,68 @@ async function tryClickDailyClaimControls(page: Page): Promise<boolean> {
   return false;
 }
 
+/** Last resort: scan clickable DOM for bonus-related copy (handles icon-only + aria). */
+async function tryClickDailyBonusDomHeuristic(page: Page): Promise<boolean> {
+  const clicked = await page.evaluate(() => {
+    const els = Array.from(
+      document.querySelectorAll(
+        'button, a, [role="button"], [role="link"], [role="tab"], div[class*="cursor-pointer"]',
+      ),
+    );
+    const bad = /sign\s+in\s+with|connect\s+wallet|^follow\b|^share\b|^reply|^settings$|^close$|^cancel$/i;
+    const good =
+      /claim|collect|redeem|grab|bonus|billboard|streak|check\s*-?\s*in|daily\s+reward|sign\s*-?\s*in\s+bonus|reward|free\s*¢|¢\s*\d|\+\s*\d+\s*¢|earn\s+now|tap\s+to|^\+\d+/i;
+    for (const el of els) {
+      const h = el as HTMLElement;
+      const txt = (h.innerText || h.textContent || "").replace(/\s+/g, " ").trim();
+      const aria = `${h.getAttribute("aria-label") ?? ""} ${h.getAttribute("title") ?? ""}`;
+      const hay = `${txt} ${aria}`.trim();
+      if (hay.length < 2 || hay.length > 220) continue;
+      if (bad.test(hay) && !good.test(hay)) continue;
+      if (!good.test(hay)) continue;
+      const r = h.getBoundingClientRect();
+      if (r.width < 4 || r.height < 4) continue;
+      const st = window.getComputedStyle(h);
+      if (st.visibility === "hidden" || st.display === "none" || Number(st.opacity) < 0.05) continue;
+      h.click();
+      return hay.slice(0, 90);
+    }
+    return "";
+  });
+  if (clicked) {
+    await humanPause(page);
+    await clickFirstVisibleByRole(page, [/confirm/i, /ok/i, /got it/i, /continue/i]);
+    await dismissBlockingOverlays(page);
+    return true;
+  }
+  return false;
+}
+
+async function logDailyBonusCandidates(page: Page) {
+  const snippets = await page.evaluate(() => {
+    const out: string[] = [];
+    const els = document.querySelectorAll('button, a, [role="button"], [role="link"], [role="tab"]');
+    for (let i = 0; i < els.length && out.length < 14; i++) {
+      const el = els[i];
+      const txt = (el.textContent || "").replace(/\s+/g, " ").trim();
+      const a = el.getAttribute("aria-label") || "";
+      if (txt.length >= 3 && txt.length < 88 && /¢|claim|bonus|daily|streak|billboard|reward|clout|bounty/i.test(txt)) {
+        out.push(txt);
+      } else if (a && /claim|bonus|daily|collect/i.test(a)) {
+        out.push(`[aria] ${a}`);
+      }
+    }
+    return out;
+  });
+  if (snippets.length > 0) {
+    await appendLog(`Daily UI candidates seen: ${snippets.join(" · ")}`, "info");
+  }
+}
+
 async function taskDailyCheckIn(page: Page) {
   await waitForSimclusterApp(page);
   await ensureDailyBountiesTab(page);
+  await logDailyBonusCandidates(page);
 
   await humanPause(page, 800, 1800);
   await clickFirstVisibleByRole(page, [/daily sign-?in/i, /sign-?in bonus/i, /billboard/i, /streak/i]).catch(() => null);
@@ -648,6 +717,10 @@ async function taskDailyCheckIn(page: Page) {
     await humanPause(page, 400, 900);
     if (await tryClickDailyClaimControls(page)) {
       await appendLog("Daily check-in: clicked a claim/collect control.", "success");
+      return;
+    }
+    if (await tryClickDailyBonusDomHeuristic(page)) {
+      await appendLog("Daily check-in: clicked via DOM heuristic (bonus-related text/aria).", "success");
       return;
     }
   }
@@ -670,6 +743,10 @@ async function taskDailyCheckIn(page: Page) {
     await humanPause(page, 400, 800);
     if (await tryClickDailyClaimControls(page)) {
       await appendLog("Daily check-in: clicked a claim control (fallback route).", "success");
+      return;
+    }
+    if (await tryClickDailyBonusDomHeuristic(page)) {
+      await appendLog("Daily check-in: clicked via DOM heuristic (fallback route).", "success");
       return;
     }
   }
