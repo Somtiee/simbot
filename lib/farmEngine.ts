@@ -496,7 +496,12 @@ async function taskDailyCheckIn(page: Page) {
       }
     }
     if (!clicked) {
-      throw new Error("Daily check-in controls were not found.");
+      const bodyText = (await page.locator("body").innerText().catch(() => "")) || "";
+      if (/expires in 24 hours|already claimed|next reward|streak/i.test(bodyText)) {
+        await appendLog("Daily check-in appears already claimed for this session.", "info");
+      } else {
+        throw new Error("Daily check-in controls were not found.");
+      }
     }
   }
   await humanPause(page);
@@ -619,7 +624,8 @@ async function taskBounties(page: Page, _account: SimclusterAccount, seed: numbe
 
   const started = await clickFirstVisibleByRole(page, [/new bounty/i, /place bounty/i, /create bounty/i]);
   if (!started) {
-    throw new Error("No claimable bounty and could not start a new bounty.");
+    await appendLog("Bounties page open but no claimable/new bounty action visible.", "warn");
+    return;
   }
   await humanPause(page);
 
@@ -689,7 +695,17 @@ async function createSquadBounties(
   for (let i = 1; i <= count; i += 1) {
     const title = `${SQUAD_BOUNTY_PREFIX}-${cycleDate}-${accountTag}-${String(i).padStart(2, "0")}`;
     await appendLog(`${account.xHandle} -> bounty create start: ${title}`, "info");
-    const openedCreate = await clickFirstVisibleByRole(page, SELECTORS.bountyCreateButton);
+    let openedCreate = await clickFirstVisibleByRole(page, SELECTORS.bountyCreateButton);
+    if (!openedCreate) {
+      const explicitCreate = page
+        .locator("button, a, [role='button'], [role='link']")
+        .filter({ hasText: /create bounty|new bounty|set bounty|place bounty/i })
+        .first();
+      if (await explicitCreate.isVisible().catch(() => false)) {
+        await explicitCreate.click({ timeout: 5000, force: true }).catch(() => null);
+        openedCreate = true;
+      }
+    }
     if (!openedCreate) {
       await appendLog(`${account.xHandle} -> bounty create failed: open form missing`, "warn");
       continue;
