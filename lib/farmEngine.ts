@@ -498,6 +498,8 @@ async function taskDailyCheckIn(page: Page) {
   const openedBonuses = await openSectionWithRoutes(page, [/bonuses?/i, /daily bonus/i, /daily sign/i], SECTION_ROUTES.bonuses);
   if (!openedBonuses) throw new Error("Could not open Bonuses/Daily panel.");
   await humanPause(page, 900, 2000);
+  await clickFirstVisibleByRole(page, [/daily sign-?in bonus/i, /daily bonus/i, /streak/i]).catch(() => null);
+  await humanPause(page, 500, 1100);
   const claimButtons = page
     .locator("button, a, [role='button'], [role='link']")
     .filter({ hasText: /(^claim\b|claim\s*\+?\d+\s*[c¢]?)/i });
@@ -552,7 +554,25 @@ async function taskCreateConcept(page: Page, _account: SimclusterAccount, seed: 
   if (!opened) {
     throw new Error("Could not open Concepts.");
   }
-  const startedConcept = await clickFirstVisibleByRole(page, SELECTORS.newConcept);
+  let startedConcept = await clickFirstVisibleByRole(page, SELECTORS.newConcept);
+  if (!startedConcept) {
+    const conceptEditorPresent =
+      (await page.locator('input[placeholder*="name" i], input[name*="name" i]').first().isVisible().catch(() => false)) ||
+      (await page.locator('textarea, [contenteditable="true"]').first().isVisible().catch(() => false));
+    if (conceptEditorPresent) {
+      startedConcept = true;
+    }
+  }
+  if (!startedConcept) {
+    const sidebarNewConcept = page
+      .locator("button, a, [role='button'], [role='link']")
+      .filter({ hasText: /new concept/i })
+      .first();
+    if (await sidebarNewConcept.isVisible().catch(() => false)) {
+      await sidebarNewConcept.click({ timeout: 5000, force: true }).catch(() => null);
+      startedConcept = true;
+    }
+  }
   if (!startedConcept) {
     throw new Error("Could not start a new concept.");
   }
