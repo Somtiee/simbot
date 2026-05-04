@@ -401,7 +401,7 @@ async function openPostComposer(page: Page) {
     "https://simcluster.ai",
   ];
   for (const url of routeGuesses) {
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => null);
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => null);
     await humanPause(page, 900, 2200);
     if (await isLoggedOut()) {
       throw new Error("Session appears logged out while opening post composer.");
@@ -446,7 +446,7 @@ async function clickAllVisibleClaims(page: Page, retries = 2) {
 async function openSectionWithRoutes(page: Page, labels: RegExp[], routes: readonly string[]) {
   if (await gotoSection(page, labels)) return true;
   for (const route of routes) {
-    await page.goto(route, { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => null);
+    await page.goto(route, { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => null);
     await humanPause(page, 700, 1500);
     if (await gotoSection(page, labels)) return true;
     const landed = page.url();
