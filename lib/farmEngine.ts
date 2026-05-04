@@ -6,8 +6,9 @@ import type { Browser, BrowserContext, Cookie, Locator, Page } from "playwright"
 import { POST_TEMPLATES, THEMES } from "@/lib/agentConfig";
 import { isFarmCooldownEnabled } from "@/lib/farmCooldown";
 import { fetchXHandleForAgentToken, isPlaceholderXHandle } from "@/lib/simclusterProfile";
+import { readSquadConfig, normalizeSquadConfig } from "@/lib/squadConfig";
 import { serverPaths } from "@/lib/serverDataPaths";
-import type { SimclusterAccount } from "@/types";
+import type { SimclusterAccount, SquadFlywheelConfig } from "@/types";
 
 const ACCOUNTS_FILE = serverPaths.accountsJson();
 const FARM_STATUS_FILE = serverPaths.farmStatusJson();
@@ -139,6 +140,18 @@ const SELECTORS = {
   claim: [/check-?in/i, /daily/i, /claim/i],
   feedCards: ["article", '[data-testid*="post"]', '[class*="post"]'],
   likeButton: [/like/i, /heart/i],
+  // Squad flywheel bounty controls (text-first to survive layout changes).
+  bountyCreateButton: [/create.*bounty/i, /new bounty/i, /set bounty/i, /place bounty/i],
+  bountyTitleInput:
+    'input[placeholder*="title" i], input[name*="title" i], input[aria-label*="title" i]',
+  bountyDescriptionInput:
+    'textarea[placeholder*="description" i], textarea[name*="description" i], textarea, [contenteditable="true"]',
+  bountySearchInput:
+    'input[placeholder*="search" i], input[name*="search" i], input[aria-label*="search" i], input[type="search"]',
+  bountySubmitButton: [/submit/i, /create/i, /confirm/i, /publish/i, /place/i],
+  bountyClaimButton: [/claim/i, /complete/i, /collect/i, /reward/i, /farm/i],
+  bountyUseConceptButton: [/use concept/i, /select concept/i, /open concept/i, /generate/i],
+  bountyOpenCardButton: [/view/i, /open/i, /details?/i, /farm/i],
 };
 
 type TaskFn = (page: Page, account: SimclusterAccount, seed: number) => Promise<void>;
@@ -159,6 +172,11 @@ type FarmStatus = {
   currentAccountProgress: number;
   overallProgress: number;
   successMessage?: string;
+  squadConfig?: SquadFlywheelConfig;
+  bountyCycleDate?: string;
+  bountyCreatedCount?: number;
+  bountyFarmedCount?: number;
+  estimatedCloutEarned?: number;
   logs: Array<{ ts: string; text: string; tone: LogTone }>;
 };
 
@@ -172,6 +190,9 @@ const defaultStatus = (): FarmStatus => ({
   completedAccounts: 0,
   currentAccountProgress: 0,
   overallProgress: 0,
+  bountyCreatedCount: 0,
+  bountyFarmedCount: 0,
+  estimatedCloutEarned: 0,
   logs: [],
 });
 
@@ -179,6 +200,34 @@ function getPostsPerAccountTarget() {
   const raw = Number(process.env.FARM_POSTS_PER_ACCOUNT ?? 4);
   if (!Number.isFinite(raw)) return 4;
   return Math.max(1, Math.min(8, Math.floor(raw)));
+}
+
+const SQUAD_BOUNTY_PREFIX = "🔥 SQUAD-BOUNTY";
+const SQUAD_BOUNTY_DESC_TEMPLATES = [
+  "Drop your hardest {theme} slop using this concept and earn massive clout 🔥",
+  "Speed-run a wild {theme} post from this concept and collect reward energy.",
+  "Make one chaotic but useful {theme} post. Bonus points for meme precision.",
+  "Cook a high-reply {theme} post from this concept and farm the leaderboard.",
+  "Ship an AI-savage {theme} angle and cash this bounty instantly.",
+  "Post your most degen {theme} insight using this concept and claim clout.",
+  "Turn this concept into a scroll-stopping {theme} post and harvest rewards.",
+  "Build a spicy {theme} narrative from this concept and print engagement.",
+  "Create a clean, viral-ready {theme} slop post and lock in the bounty.",
+  "One concept, one cracked {theme} post, one fast reward. Execute now.",
+  "Generate a bold {theme} post, then submit and claim this squad bounty.",
+];
+
+function todayKeyUTC(): string {
+  const d = new Date();
+  return `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, "0")}${String(d.getUTCDate()).padStart(2, "0")}`;
+}
+
+function safeHandleTag(handle: string): string {
+  return handle.replace(/^@+/, "").replace(/[^a-z0-9_]/gi, "").slice(0, 24) || "acct";
+}
+
+function isSameBountyCycle(a?: string, b?: string): boolean {
+  return Boolean(a && b && a === b);
 }
 
 function daySeed() {
@@ -274,6 +323,87 @@ async function clickFirstVisibleByRole(page: Page, names: RegExp[]) {
     if (await textTarget.isVisible().catch(() => false)) {
       await textTarget.click({ timeout: 5000 }).catch(() => null);
       return true;
+    }
+  }
+  return false;
+}
+
+async function isPostComposerVisible(page: Page) {
+  const textarea = page.locator("textarea, [contenteditable='true']").first();
+  if (await textarea.isVisible().catch(() => false)) return true;
+
+  for (const re of SELECTORS.generateText) {
+    const btn = page.getByRole("button", { name: re }).first();
+    if (await btn.isVisible().catch(() => false)) return true;
+  }
+  for (const re of SELECTORS.generateImage) {
+    const btn = page.getByRole("button", { name: re }).first();
+    if (await btn.isVisible().catch(() => false)) return true;
+  }
+  return false;
+}
+
+async function openPostComposer(page: Page) {
+  const isLoggedOut = async () => {
+    const u = page.url();
+    if (/login|sign-?in|\/auth|\/signup/i.test(u)) return true;
+    const signIn = page.getByRole("button", { name: /sign in|log in|continue with/i }).first();
+    return signIn.isVisible().catch(() => false);
+  };
+
+  const clickTargets = async () => {
+    if (await clickFirstVisibleByRole(page, [/new content/i, /create post/i, /compose/i])) return true;
+
+    const explicit = page
+      .locator(
+        "button, a, [role='button'], [role='link']",
+      )
+      .filter({ hasText: /new content|create post|compose/i })
+      .first();
+    if (await explicit.isVisible().catch(() => false)) {
+      await explicit.click({ timeout: 5000 }).catch(() => null);
+      return true;
+    }
+
+    const ariaTarget = page
+      .locator("[aria-label*='new content' i], [title*='new content' i], [data-testid*='new-content' i]")
+      .first();
+    if (await ariaTarget.isVisible().catch(() => false)) {
+      await ariaTarget.click({ timeout: 5000 }).catch(() => null);
+      return true;
+    }
+    return false;
+  };
+
+  if (await isPostComposerVisible(page)) return true;
+  if (await isLoggedOut()) {
+    throw new Error("Session appears logged out while opening post composer.");
+  }
+
+  const clicked = await clickTargets();
+  if (clicked) {
+    await humanPause(page);
+    if (await isPostComposerVisible(page)) return true;
+  }
+
+  const routeGuesses = [
+    "https://simcluster.ai/home",
+    "https://simcluster.ai/studio",
+    "https://simcluster.ai/create",
+    "https://simcluster.ai/post",
+    "https://simcluster.ai",
+  ];
+  for (const url of routeGuesses) {
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => null);
+    await humanPause(page, 900, 2200);
+    if (await isLoggedOut()) {
+      throw new Error("Session appears logged out while opening post composer.");
+    }
+    if (await isPostComposerVisible(page)) return true;
+    const clickedAfterGoto = await clickTargets();
+    if (clickedAfterGoto) {
+      await humanPause(page);
+      if (await isPostComposerVisible(page)) return true;
     }
   }
   return false;
@@ -391,9 +521,13 @@ async function taskCreateConcept(page: Page, _account: SimclusterAccount, seed: 
 }
 
 async function taskCreatePost(page: Page, _account: SimclusterAccount, seed: number) {
-  const openedStudio =
-    (await gotoSection(page, SELECTORS.navStudio)) || (await clickFirstVisibleByRole(page, SELECTORS.newContent));
-  if (!openedStudio) {
+  let composerReady = false;
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    composerReady = await openPostComposer(page);
+    if (composerReady) break;
+    await appendLog(`Create Post -> retrying composer open (${attempt}/2)`, "warn");
+  }
+  if (!composerReady) {
     throw new Error("Could not open post composer.");
   }
   await humanPause(page);
@@ -459,6 +593,125 @@ async function taskBounties(page: Page, _account: SimclusterAccount, seed: numbe
   if (!submitted) {
     throw new Error("Could not submit bounty.");
   }
+}
+
+async function fillFirstVisibleLocator(page: Page, selector: string, value: string): Promise<boolean> {
+  const field = page.locator(selector).first();
+  if (await field.isVisible().catch(() => false)) {
+    await field.fill(value).catch(() => null);
+    return true;
+  }
+  return false;
+}
+
+async function ensureBountiesSection(page: Page): Promise<void> {
+  const opened = await gotoSection(page, SELECTORS.navBounties);
+  if (!opened) {
+    throw new Error("Could not open Bounties.");
+  }
+  await humanPause(page, 800, 1800);
+}
+
+function resolveBountyDescription(
+  account: SimclusterAccount,
+  index: number,
+  cfg: SquadFlywheelConfig,
+  seed: number,
+): string {
+  const base = cfg.bountyDescriptionTemplate?.trim() || pick(SQUAD_BOUNTY_DESC_TEMPLATES);
+  const theme = THEMES[(seed + index) % THEMES.length] ?? pick(THEMES);
+  return base.replace(/\{theme\}/gi, theme).replace(/\{handle\}/gi, account.xHandle).slice(0, 240);
+}
+
+async function verifyBountyVisible(page: Page, title: string): Promise<boolean> {
+  await fillFirstVisibleLocator(page, SELECTORS.bountySearchInput, title).catch(() => null);
+  await humanPause(page, 600, 1200);
+  const hit = page.getByText(title, { exact: false }).first();
+  return hit.isVisible().catch(() => false);
+}
+
+async function createSquadBounties(
+  page: Page,
+  account: SimclusterAccount,
+  cycleDate: string,
+  count: number,
+  cfg: SquadFlywheelConfig,
+  seed: number,
+): Promise<{ created: number; createdTitles: string[] }> {
+  await ensureBountiesSection(page);
+  let created = 0;
+  const createdTitles: string[] = [];
+  const accountTag = safeHandleTag(account.xHandle);
+
+  for (let i = 1; i <= count; i += 1) {
+    const title = `${SQUAD_BOUNTY_PREFIX}-${cycleDate}-${accountTag}-${String(i).padStart(2, "0")}`;
+    await appendLog(`${account.xHandle} -> bounty create start: ${title}`, "info");
+    const openedCreate = await clickFirstVisibleByRole(page, SELECTORS.bountyCreateButton);
+    if (!openedCreate) {
+      await appendLog(`${account.xHandle} -> bounty create failed: open form missing`, "warn");
+      continue;
+    }
+    await humanPause(page, 700, 1600);
+
+    const titleFilled = await fillFirstVisibleLocator(page, SELECTORS.bountyTitleInput, title);
+    const descriptionFilled = await fillFirstVisibleLocator(
+      page,
+      SELECTORS.bountyDescriptionInput,
+      resolveBountyDescription(account, i, cfg, seed),
+    );
+    await clickFirstVisibleByRole(page, [/latest concept/i, /owned/i, /my concepts?/i, /select concept/i]).catch(() => null);
+    await humanPause(page, 700, 1800);
+
+    const submitted = await clickFirstVisibleByRole(page, SELECTORS.bountySubmitButton);
+    if (!submitted || !titleFilled || !descriptionFilled) {
+      await appendLog(`${account.xHandle} -> bounty create failed: missing form controls for ${title}`, "warn");
+      continue;
+    }
+    await humanPause(page, 1200, 2600);
+    const verified = await verifyBountyVisible(page, title);
+    if (verified) {
+      created += 1;
+      createdTitles.push(title);
+      await appendLog(`${account.xHandle} -> bounty created: ${title}`, "success");
+    } else {
+      await appendLog(`${account.xHandle} -> bounty submit unverified: ${title}`, "warn");
+    }
+  }
+  return { created, createdTitles };
+}
+
+async function farmSquadBounties(
+  page: Page,
+  account: SimclusterAccount,
+  cycleDate: string,
+  maxTargets: number,
+  seed: number,
+): Promise<{ farmed: number }> {
+  await ensureBountiesSection(page);
+  const searchToken = `${SQUAD_BOUNTY_PREFIX}-${cycleDate}`;
+  await fillFirstVisibleLocator(page, SELECTORS.bountySearchInput, searchToken).catch(() => null);
+  await humanPause(page, 900, 1800);
+
+  let farmed = 0;
+  for (let i = 0; i < maxTargets; i += 1) {
+    const openedCard =
+      (await clickFirstVisibleByRole(page, SELECTORS.bountyOpenCardButton)) ||
+      (await clickFirstVisibleByRole(page, SELECTORS.bountyUseConceptButton));
+    if (!openedCard) break;
+    await humanPause(page, 900, 1800);
+
+    await clickFirstVisibleByRole(page, SELECTORS.bountyUseConceptButton).catch(() => null);
+    await runTask(page, account, seed + i, `Squad Bounty Post ${i + 1}`, taskCreatePost as TaskFn, { required: false });
+    const claimed = await clickFirstVisibleByRole(page, SELECTORS.bountyClaimButton);
+    if (claimed) {
+      farmed += 1;
+      await appendLog(`${account.xHandle} -> squad bounty farmed #${farmed}`, "success");
+    }
+    await ensureBountiesSection(page);
+    await fillFirstVisibleLocator(page, SELECTORS.bountySearchInput, searchToken).catch(() => null);
+    await humanPause(page, 700, 1400);
+  }
+  return { farmed };
 }
 
 async function taskLightEngagement(page: Page, accounts: SimclusterAccount[]) {
@@ -588,7 +841,10 @@ export type FarmStartResult = { ok: true } | { ok: false; message: string };
  * Validates lock, persists “running”, then kicks off the long-running farm in the background.
  * Await this for the HTTP response — it returns before accounts finish processing.
  */
-export async function requestFarmStart(headed: boolean): Promise<FarmStartResult> {
+export async function requestFarmStart(
+  headed: boolean,
+  configOverride?: Partial<SquadFlywheelConfig>,
+): Promise<FarmStartResult> {
   let status = await readFarmStatus();
   if (status.running) {
     const cleared = await tryClearStaleFarmLock(status);
@@ -605,9 +861,13 @@ export async function requestFarmStart(headed: boolean): Promise<FarmStartResult
   const seed = daySeed();
   const allAccounts = await readAccounts();
   const rotated = sortAccountsForDay(allAccounts, seed);
+  const persistedConfig = await readSquadConfig();
+  const squadConfig = normalizeSquadConfig({ ...persistedConfig, ...configOverride });
   const tasks = taskPlanForRun();
   const postsPerAccount = getPostsPerAccountTarget();
-  const totalTasksPerAccount = tasks.length + postsPerAccount * 2 + 1;
+  const totalTasksPerAccount = squadConfig.enableSquadBountyFlywheel
+    ? tasks.length + squadConfig.bountiesPerAccount * 2 + 1
+    : tasks.length + postsPerAccount * 2 + 1;
 
   if (rotated.length === 0) {
     console.log("[farm] no accounts found in data/accounts.json");
@@ -627,17 +887,21 @@ export async function requestFarmStart(headed: boolean): Promise<FarmStartResult
     running: true,
     startedAt: started,
     lastFarmHeartbeatAt: started,
-    totalAccounts: rotated.length,
+    totalAccounts: squadConfig.enableSquadBountyFlywheel ? rotated.length * 2 : rotated.length,
+    squadConfig,
+    bountyCycleDate: todayKeyUTC(),
     logs: [
       {
         ts: started,
-        text: `Farm started for ${rotated.length} account(s), target ${postsPerAccount} post(s) per account.`,
+        text: squadConfig.enableSquadBountyFlywheel
+          ? `Farm started for ${rotated.length} account(s). Squad bounty flywheel enabled (${squadConfig.bountiesPerAccount} bounties/account).`
+          : `Farm started for ${rotated.length} account(s), target ${postsPerAccount} post(s) per account.`,
         tone: "info",
       },
     ],
   });
 
-  void runFarmAccountsJob(headed, seed, rotated, updated, tasks, totalTasksPerAccount, postsPerAccount);
+  void runFarmAccountsJob(headed, seed, rotated, updated, tasks, totalTasksPerAccount, postsPerAccount, squadConfig);
 
   return { ok: true };
 }
@@ -655,25 +919,26 @@ async function runFarmAccountsJob(
   tasks: TaskDef[],
   totalTasksPerAccount: number,
   postsPerAccount: number,
+  squadConfig: SquadFlywheelConfig,
 ) {
   try {
   // One preflight launch prevents "first account fails" while deps are installed.
   const preflight = await launchChromiumWithSelfHeal(false);
   await preflight.close().catch(() => null);
   await appendLog("Browser runtime check passed.", "info");
+  const cycleDate = todayKeyUTC();
+  const totalUnits = squadConfig.enableSquadBountyFlywheel ? rotated.length * 2 : rotated.length;
+  let completedUnits = 0;
+  let totalBountiesCreated = 0;
+  let totalBountiesFarmed = 0;
 
-  for (let accountIndex = 0; accountIndex < rotated.length; accountIndex += 1) {
-    const account = rotated[accountIndex];
+  const processAccount = async (account: SimclusterAccount, phase: "create" | "farm" | "standard") => {
     const originalIndex = updated.findIndex((a) => a.id === account.id);
-    if (originalIndex < 0) continue;
+    if (originalIndex < 0) return;
 
     if (isFarmCooldownEnabled() && farmedInLast24h(updated[originalIndex].lastFarmed)) {
       await appendLog(`${account.xHandle} -> skipped (already farmed within last 24h)`, "warn");
-      await patchStatus({
-        completedAccounts: accountIndex + 1,
-        overallProgress: Math.round(((accountIndex + 1) / rotated.length) * 100),
-      });
-      continue;
+      return;
     }
 
     updated[originalIndex] = {
@@ -686,10 +951,13 @@ async function runFarmAccountsJob(
       currentAccountId: account.id,
       currentAccountHandle: account.xHandle,
       currentAccountProgress: 0,
-      overallProgress: Math.round((accountIndex / rotated.length) * 100),
-      completedAccounts: accountIndex,
+      completedAccounts: completedUnits,
+      overallProgress: Math.round((completedUnits / totalUnits) * 100),
+      bountyCreatedCount: totalBountiesCreated,
+      bountyFarmedCount: totalBountiesFarmed,
+      estimatedCloutEarned: totalBountiesFarmed * 25 + totalBountiesCreated * 10,
     });
-    await appendLog(`${account.xHandle} -> account session started`, "info");
+    await appendLog(`${account.xHandle} -> account session started (${phase})`, "info");
 
     let context: BrowserContext | null = null;
     let browser: Browser | null = null;
@@ -707,7 +975,6 @@ async function runFarmAccountsJob(
             }
           : undefined;
       context = await browser.newContext(extraHTTPHeaders ? { extraHTTPHeaders } : undefined);
-
       if (Array.isArray(account.cookies) && account.cookies.length > 0) {
         await context.addCookies(account.cookies as Cookie[]);
       }
@@ -716,11 +983,8 @@ async function runFarmAccountsJob(
       await page.goto("https://simcluster.ai", { waitUntil: "domcontentloaded", timeout: 60000 });
       await humanPause(page);
 
-      const landingUrl = page.url();
-      if (/login|sign-?in|\/auth|\/signup/i.test(landingUrl)) {
-        throw new Error(
-          "Simcluster opened a sign-in page — this session is not valid for the website. Use Connect (link code) or Cookies again.",
-        );
+      if (/login|sign-?in|\/auth|\/signup/i.test(page.url())) {
+        throw new Error("Simcluster opened sign-in page. Reconnect this account session.");
       }
 
       let farmAccount: SimclusterAccount = account;
@@ -735,61 +999,103 @@ async function runFarmAccountsJob(
       }
 
       let completedSteps = 0;
-      for (let taskIndex = 0; taskIndex < tasks.length; taskIndex += 1) {
-        const task = tasks[taskIndex];
-        await runTask(page, farmAccount, seed, task.name, task.fn, { required: task.required });
-        completedSteps += 1;
-        await patchStatus({
-          currentAccountProgress: Math.round((completedSteps / totalTasksPerAccount) * 100),
-        });
+      if (phase !== "farm") {
+        for (let taskIndex = 0; taskIndex < tasks.length; taskIndex += 1) {
+          const task = tasks[taskIndex];
+          await runTask(page, farmAccount, seed, task.name, task.fn, { required: false });
+          completedSteps += 1;
+          await patchStatus({ currentAccountProgress: Math.round((completedSteps / totalTasksPerAccount) * 100) });
+        }
       }
 
-      let postsCompleted = 0;
-      for (let postIndex = 0; postIndex < postsPerAccount; postIndex += 1) {
-        const postOk = await runTask(
+      if (squadConfig.enableSquadBountyFlywheel && phase === "create") {
+        if (isSameBountyCycle(updated[originalIndex].lastBountyCycle, cycleDate)) {
+          await appendLog(`${farmAccount.xHandle} -> squad bounty creation already done today`, "info");
+        } else {
+          const created = await createSquadBounties(
+            page,
+            farmAccount,
+            cycleDate,
+            squadConfig.bountiesPerAccount,
+            squadConfig,
+            seed + originalIndex,
+          );
+          totalBountiesCreated += created.created;
+          await patchStatus({
+            bountyCreatedCount: totalBountiesCreated,
+            estimatedCloutEarned: totalBountiesFarmed * 25 + totalBountiesCreated * 10,
+          });
+          await appendLog(
+            `${farmAccount.xHandle} -> squad create phase done (${created.created}/${squadConfig.bountiesPerAccount})`,
+            created.created > 0 ? "success" : "warn",
+          );
+        }
+      } else if (squadConfig.enableSquadBountyFlywheel && phase === "farm") {
+        const farmed = await farmSquadBounties(
           page,
           farmAccount,
-          seed + postIndex,
-          `Create Post ${postIndex + 1}/${postsPerAccount}`,
-          taskCreatePost as TaskFn,
-          { required: false },
+          cycleDate,
+          squadConfig.bountiesPerAccount * rotated.length,
+          seed + originalIndex,
         );
-        if (postOk) postsCompleted += 1;
-        completedSteps += 1;
+        totalBountiesFarmed += farmed.farmed;
         await patchStatus({
-          currentAccountProgress: Math.round((completedSteps / totalTasksPerAccount) * 100),
+          bountyFarmedCount: totalBountiesFarmed,
+          estimatedCloutEarned: totalBountiesFarmed * 25 + totalBountiesCreated * 10,
         });
+        updated[originalIndex] = {
+          ...updated[originalIndex],
+          lastBountyCycle: cycleDate,
+        };
+        await appendLog(`${farmAccount.xHandle} -> squad farm phase done (${farmed.farmed} bounty actions)`, "success");
+      } else {
+        let postsCompleted = 0;
+        for (let postIndex = 0; postIndex < postsPerAccount; postIndex += 1) {
+          const postOk = await runTask(
+            page,
+            farmAccount,
+            seed + postIndex,
+            `Create Post ${postIndex + 1}/${postsPerAccount}`,
+            taskCreatePost as TaskFn,
+            { required: false },
+          );
+          if (postOk) postsCompleted += 1;
+          completedSteps += 1;
+          await patchStatus({ currentAccountProgress: Math.round((completedSteps / totalTasksPerAccount) * 100) });
 
-        await runTask(
-          page,
-          farmAccount,
-          seed + 100 + postIndex,
-          `Light Engagement ${postIndex + 1}/${postsPerAccount}`,
-          async (p) => {
-            await taskLightEngagement(p, updated);
-          },
-          { required: false },
+          await runTask(
+            page,
+            farmAccount,
+            seed + 100 + postIndex,
+            `Light Engagement ${postIndex + 1}/${postsPerAccount}`,
+            async (p) => {
+              await taskLightEngagement(p, updated);
+            },
+            { required: false },
+          );
+          completedSteps += 1;
+          await patchStatus({ currentAccountProgress: Math.round((completedSteps / totalTasksPerAccount) * 100) });
+        }
+        await appendLog(
+          `${farmAccount.xHandle} -> posting sprint result: ${postsCompleted}/${postsPerAccount} post(s) completed`,
+          postsCompleted > 0 ? "success" : "warn",
         );
-        completedSteps += 1;
-        await patchStatus({
-          currentAccountProgress: Math.round((completedSteps / totalTasksPerAccount) * 100),
-        });
+        if (postsCompleted === 0) {
+          throw new Error("No posts were created for this account.");
+        }
       }
-      await appendLog(
-        `${farmAccount.xHandle} -> posting sprint result: ${postsCompleted}/${postsPerAccount} post(s) completed`,
-        postsCompleted > 0 ? "success" : "warn",
+
+      await runTask(
+        page,
+        farmAccount,
+        seed + 700,
+        "Final Engagement Sweep",
+        async (p) => {
+          await taskLightEngagement(p, updated);
+        },
+        { required: false },
       );
-      if (postsCompleted === 0) {
-        throw new Error("No posts were created for this account.");
-      }
 
-      await runTask(page, farmAccount, seed, "Final Engagement Sweep", async (p) => {
-        await taskLightEngagement(p, updated);
-      }, { required: false });
-      completedSteps += 1;
-      await patchStatus({ currentAccountProgress: 100 });
-
-      // Keep runtime in the requested window (approx 2-4 minutes).
       const elapsed = Date.now() - startedAt;
       if (elapsed < 120_000) {
         await page.waitForTimeout(120_000 - elapsed);
@@ -804,13 +1110,11 @@ async function runFarmAccountsJob(
         cloutEstimate: parsedClout ?? updated[originalIndex].cloutEstimate,
         dailyRotationSeed: seed,
       };
-      console.log(`[farm] ${farmAccount.xHandle} -> completed`);
       await appendLog(
         `${farmAccount.xHandle} -> completed -> +${updated[originalIndex].cloutEstimate ?? "?"} CLOUT est.`,
         "success",
       );
     } catch (error) {
-      console.error(`[farm] ${account.xHandle} -> account run failed`, error);
       if (page) await safeShot(page, `${account.id}-account-failure`).catch(() => null);
       const detail = error instanceof Error ? error.message : String(error);
       updated[originalIndex] = {
@@ -828,9 +1132,36 @@ async function runFarmAccountsJob(
         // best effort cleanup
       }
       await browser?.close().catch(() => null);
+    }
+  };
+
+  if (squadConfig.enableSquadBountyFlywheel) {
+    await appendLog(`Squad bounty creation phase started (${squadConfig.bountiesPerAccount}/account).`, "info");
+    for (let i = 0; i < rotated.length; i += 1) {
+      await processAccount(rotated[i], "create");
+      completedUnits += 1;
       await patchStatus({
-        completedAccounts: accountIndex + 1,
-        overallProgress: Math.round(((accountIndex + 1) / rotated.length) * 100),
+        completedAccounts: completedUnits,
+        overallProgress: Math.round((completedUnits / totalUnits) * 100),
+      });
+    }
+
+    await appendLog("Squad bounty farming phase started (all accounts farm squad bounties).", "info");
+    for (let i = 0; i < rotated.length; i += 1) {
+      await processAccount(rotated[i], "farm");
+      completedUnits += 1;
+      await patchStatus({
+        completedAccounts: completedUnits,
+        overallProgress: Math.round((completedUnits / totalUnits) * 100),
+      });
+    }
+  } else {
+    for (let i = 0; i < rotated.length; i += 1) {
+      await processAccount(rotated[i], "standard");
+      completedUnits += 1;
+      await patchStatus({
+        completedAccounts: completedUnits,
+        overallProgress: Math.round((completedUnits / totalUnits) * 100),
       });
     }
   }
@@ -849,14 +1180,21 @@ async function runFarmAccountsJob(
     currentAccountHandle: undefined,
     currentAccountProgress: 100,
     overallProgress: 100,
-    successMessage: `✅ AGENT FARM COMPLETE — ALL ${rotated.length} ACCOUNTS AT MAX DAILY CLOUT + NEW AI POSTS & IMAGES GENERATED`,
+    bountyCreatedCount: totalBountiesCreated,
+    bountyFarmedCount: totalBountiesFarmed,
+    estimatedCloutEarned: totalBountiesFarmed * 25 + totalBountiesCreated * 10,
+    successMessage: squadConfig.enableSquadBountyFlywheel
+      ? `✅ Squad created ${totalBountiesCreated} bounties • All accounts farmed squad bounties • massive clout loop complete`
+      : `✅ AGENT FARM COMPLETE — ALL ${rotated.length} ACCOUNTS AT MAX DAILY CLOUT + NEW AI POSTS & IMAGES GENERATED`,
     logs: [
       ...(await readFarmStatus()).logs.slice(-59),
       {
         ts: nowIso(),
-        text: cooldownOn
-          ? `Farm complete for ${rotated.length} account(s). Cooldown started (24h).`
-          : `Farm complete for ${rotated.length} account(s). Cooldown is off — run again anytime (set FARM_COOLDOWN_ENABLED=1 to enforce 24h limits).`,
+        text: squadConfig.enableSquadBountyFlywheel
+          ? `Squad created ${totalBountiesCreated} bounties • farmed ${totalBountiesFarmed} squad bounties • loop complete.`
+          : cooldownOn
+            ? `Farm complete for ${rotated.length} account(s). Cooldown started (24h).`
+            : `Farm complete for ${rotated.length} account(s). Cooldown is off — run again anytime (set FARM_COOLDOWN_ENABLED=1 to enforce 24h limits).`,
         tone: "success",
       },
     ],

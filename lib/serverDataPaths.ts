@@ -22,6 +22,7 @@ export function getArtifactsDir(): string {
 export const serverPaths = {
   accountsJson: () => path.join(getDataDir(), "accounts.json"),
   farmStatusJson: () => path.join(getDataDir(), "farm-status.json"),
+  squadConfigJson: () => path.join(getDataDir(), "squad-config.json"),
   connectStatusJson: () => path.join(getDataDir(), "connect-status.json"),
   farmErrorShotsDir: () => path.join(getArtifactsDir(), "farm-errors"),
 } as const;

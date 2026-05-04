@@ -43,6 +43,10 @@ type FarmStatus = {
   currentAccountHandle?: string;
   nextFarmAt?: string;
   successMessage?: string;
+  bountyCycleDate?: string;
+  bountyCreatedCount?: number;
+  bountyFarmedCount?: number;
+  estimatedCloutEarned?: number;
   logs: Array<{ ts: string; text: string; tone: "success" | "warn" | "info" }>;
   accounts?: SimclusterAccount[];
 };
@@ -74,6 +78,12 @@ const progressFromAccount = (account: SimclusterAccount) => {
 
 export default function Home() {
   const accounts = useFarmStore((state) => state.accounts);
+  const enableSquadBountyFlywheel = useFarmStore((state) => state.enableSquadBountyFlywheel);
+  const bountiesPerAccount = useFarmStore((state) => state.bountiesPerAccount);
+  const bountyDescriptionTemplate = useFarmStore((state) => state.bountyDescriptionTemplate);
+  const setEnableSquadBountyFlywheel = useFarmStore((state) => state.setEnableSquadBountyFlywheel);
+  const setBountiesPerAccount = useFarmStore((state) => state.setBountiesPerAccount);
+  const setBountyDescriptionTemplate = useFarmStore((state) => state.setBountyDescriptionTemplate);
   const addAccount = useFarmStore((state) => state.addAccount);
   const removeAccount = useFarmStore((state) => state.removeAccount);
   const updateAccount = useFarmStore((state) => state.updateAccount);
@@ -112,13 +122,37 @@ export default function Home() {
   const connectedCount = accounts.length;
   const farmingCount = accounts.filter((account) => account.status === "farming").length;
 
+  const persistSquadConfig = useCallback(
+    async (patch?: Partial<{ enableSquadBountyFlywheel: boolean; bountiesPerAccount: number; bountyDescriptionTemplate: string }>) => {
+      const next = {
+        enableSquadBountyFlywheel,
+        bountiesPerAccount,
+        bountyDescriptionTemplate,
+        ...patch,
+      };
+      await fetch("/api/squad-config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(next),
+      }).catch(() => null);
+    },
+    [enableSquadBountyFlywheel, bountiesPerAccount, bountyDescriptionTemplate],
+  );
+
   const startFarmRun = useCallback(async () => {
     const headed = forceHeadless ? false : headedMode;
     try {
       const response = await fetch("/api/farm/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ headed }),
+        body: JSON.stringify({
+          headed,
+          squadConfig: {
+            enableSquadBountyFlywheel,
+            bountiesPerAccount,
+            bountyDescriptionTemplate,
+          },
+        }),
       });
       const payload = (await response.json().catch(() => ({}))) as {
         ok?: boolean;
@@ -137,7 +171,14 @@ export default function Home() {
     } catch {
       toast.error("Network error — could not reach the server.");
     }
-  }, [connectedCount, headedMode, forceHeadless]);
+  }, [
+    connectedCount,
+    headedMode,
+    forceHeadless,
+    enableSquadBountyFlywheel,
+    bountiesPerAccount,
+    bountyDescriptionTemplate,
+  ]);
 
   useEffect(() => {
     const poll = async () => {
@@ -186,6 +227,33 @@ export default function Home() {
         /* keep default true for local dev */
       });
   }, []);
+
+  useEffect(() => {
+    void fetch("/api/squad-config", { cache: "no-store" })
+      .then((response) => response.json())
+      .then((payload: {
+        ok?: boolean;
+        config?: {
+          enableSquadBountyFlywheel?: boolean;
+          bountiesPerAccount?: number;
+          bountyDescriptionTemplate?: string;
+        };
+      }) => {
+        if (!payload?.ok || !payload.config) return;
+        if (typeof payload.config.enableSquadBountyFlywheel === "boolean") {
+          setEnableSquadBountyFlywheel(payload.config.enableSquadBountyFlywheel);
+        }
+        if (typeof payload.config.bountiesPerAccount === "number") {
+          setBountiesPerAccount(payload.config.bountiesPerAccount);
+        }
+        if (typeof payload.config.bountyDescriptionTemplate === "string") {
+          setBountyDescriptionTemplate(payload.config.bountyDescriptionTemplate);
+        }
+      })
+      .catch(() => {
+        // keep local defaults
+      });
+  }, [setBountiesPerAccount, setBountyDescriptionTemplate, setEnableSquadBountyFlywheel]);
 
   const nextFarmMs = farmStatus.nextFarmAt ? new Date(farmStatus.nextFarmAt).getTime() - cooldownNow : 0;
   const isCooldownActive = nextFarmMs > 0;
@@ -531,6 +599,51 @@ export default function Home() {
               <CardTitle className="text-base">Agent Runtime Toggles</CardTitle>
             </CardHeader>
             <CardContent className="grid gap-4 sm:grid-cols-2">
+              <div className="sm:col-span-2 rounded-md border border-fuchsia-500/30 bg-fuchsia-500/10 p-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-medium text-fuchsia-100">Enable Squad Bounty Flywheel</span>
+                  <Switch
+                    checked={enableSquadBountyFlywheel}
+                    onCheckedChange={(checked) => {
+                      setEnableSquadBountyFlywheel(checked);
+                      void persistSquadConfig({ enableSquadBountyFlywheel: checked });
+                    }}
+                  />
+                </div>
+                <p className="mt-1 text-xs text-zinc-300">
+                  Two-phase loop: all accounts create squad bounties first, then all accounts farm squad bounties.
+                </p>
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                  <label className="text-xs text-zinc-300">
+                    Bounties per account (4-6)
+                    <input
+                      type="number"
+                      min={4}
+                      max={6}
+                      value={bountiesPerAccount}
+                      onChange={(event) => {
+                        const value = Number(event.target.value || 5);
+                        setBountiesPerAccount(value);
+                        void persistSquadConfig({ bountiesPerAccount: value });
+                      }}
+                      className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950/80 p-2 text-xs text-zinc-100 outline-none focus:border-fuchsia-400"
+                    />
+                  </label>
+                  <label className="text-xs text-zinc-300">
+                    Optional bounty description template
+                    <input
+                      value={bountyDescriptionTemplate}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        setBountyDescriptionTemplate(value);
+                        void persistSquadConfig({ bountyDescriptionTemplate: value });
+                      }}
+                      placeholder="Drop your best {theme} slop and earn clout 🔥"
+                      className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950/80 p-2 text-xs text-zinc-100 outline-none focus:border-fuchsia-400"
+                    />
+                  </label>
+                </div>
+              </div>
               <div className="flex items-center justify-between rounded-md border border-zinc-700 bg-zinc-950/60 p-3">
                 <span className="text-sm">Headed mode {forceHeadless ? "(cloud: off)" : ""}</span>
                 <Switch
@@ -574,6 +687,26 @@ export default function Home() {
                 <Download className="mr-2 size-4" />
                 Full Backup / Export Config
               </Button>
+            </CardContent>
+          </Card>
+
+          <Card className="border border-fuchsia-500/30 bg-zinc-900/60">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base">Squad Flywheel Live Stats</CardTitle>
+            </CardHeader>
+            <CardContent className="grid gap-3 sm:grid-cols-3">
+              <div className="rounded-md border border-zinc-700 bg-zinc-950/60 p-3">
+                <p className="text-xs text-zinc-400">Created bounties</p>
+                <p className="text-lg font-semibold text-fuchsia-200">{farmStatus.bountyCreatedCount ?? 0}</p>
+              </div>
+              <div className="rounded-md border border-zinc-700 bg-zinc-950/60 p-3">
+                <p className="text-xs text-zinc-400">Farmed bounties</p>
+                <p className="text-lg font-semibold text-lime-200">{farmStatus.bountyFarmedCount ?? 0}</p>
+              </div>
+              <div className="rounded-md border border-zinc-700 bg-zinc-950/60 p-3">
+                <p className="text-xs text-zinc-400">Est. clout earned</p>
+                <p className="text-lg font-semibold text-cyan-200">{farmStatus.estimatedCloutEarned ?? 0}</p>
+              </div>
             </CardContent>
           </Card>
 

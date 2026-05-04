@@ -6,10 +6,16 @@ import type { SimclusterAccount } from "@/types";
 
 interface AccountsState {
   accounts: SimclusterAccount[];
+  enableSquadBountyFlywheel: boolean;
+  bountiesPerAccount: number;
+  bountyDescriptionTemplate: string;
   setAccounts: (accounts: SimclusterAccount[]) => void;
   addAccount: (account: SimclusterAccount) => void;
   updateAccount: (id: string, patch: Partial<SimclusterAccount>) => void;
   removeAccount: (id: string) => void;
+  setEnableSquadBountyFlywheel: (enabled: boolean) => void;
+  setBountiesPerAccount: (count: number) => void;
+  setBountyDescriptionTemplate: (template: string) => void;
   rotateAccountsDaily: () => void;
   hydrateFromJson: () => Promise<void>;
   persistToJson: () => Promise<void>;
@@ -57,6 +63,9 @@ export const useFarmStore = create<AccountsState>()(
   persist(
     (set, get) => ({
       accounts: initialAccounts,
+      enableSquadBountyFlywheel: false,
+      bountiesPerAccount: 5,
+      bountyDescriptionTemplate: "",
       setAccounts: (accounts) => {
         set({ accounts });
         void persistAccountsSnapshot(accounts);
@@ -81,6 +90,9 @@ export const useFarmStore = create<AccountsState>()(
           void persistAccountsSnapshot(nextAccounts);
           return { accounts: nextAccounts };
         }),
+      setEnableSquadBountyFlywheel: (enabled) => set({ enableSquadBountyFlywheel: enabled }),
+      setBountiesPerAccount: (count) => set({ bountiesPerAccount: Math.max(4, Math.min(6, Math.floor(count))) }),
+      setBountyDescriptionTemplate: (template) => set({ bountyDescriptionTemplate: template }),
       rotateAccountsDaily: () =>
         set((state) => {
           const seed = daySeed();

@@ -27,6 +27,9 @@ export async function GET() {
       completedAccounts: 0,
       currentAccountProgress: 0,
       overallProgress: 0,
+      bountyCreatedCount: 0,
+      bountyFarmedCount: 0,
+      estimatedCloutEarned: 0,
       logs: [],
       accounts: [],
     });

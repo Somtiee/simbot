@@ -10,7 +10,15 @@ export interface SimclusterAccount {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   cookies: any[];
   lastFarmed?: string;
+  /** YYYYMMDD key marking when this account last completed squad bounty cycle. */
+  lastBountyCycle?: string;
   status: AccountStatus;
   cloutEstimate?: number;
   dailyRotationSeed?: number;
+}
+
+export interface SquadFlywheelConfig {
+  enableSquadBountyFlywheel: boolean;
+  bountiesPerAccount: number;
+  bountyDescriptionTemplate?: string;
 }
