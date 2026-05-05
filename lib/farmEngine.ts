@@ -221,7 +221,7 @@ const BONUS_NAV_LABELS = [
 
 type TaskFn = (page: Page, account: SimclusterAccount, seed: number) => Promise<void>;
 type LogTone = "success" | "warn" | "info";
-type TaskDef = { name: string; fn: TaskFn; required: boolean };
+type TaskDef = { name: string; fn: TaskFn; required: boolean; timeoutMs?: number };
 
 type FarmStatus = {
   running: boolean;
@@ -1260,13 +1260,19 @@ async function runTask(
   seed: number,
   taskName: string,
   task: TaskFn,
-  options?: { required?: boolean },
+  options?: { required?: boolean; timeoutMs?: number },
 ) {
   const required = options?.required ?? true;
+  const timeoutMs = options?.timeoutMs ?? 120_000;
   try {
     console.log(`[farm] ${account.xHandle} -> ${taskName} -> start`);
     await appendLog(`${account.xHandle} -> ${taskName} -> start`, "info");
-    await task(page, account, seed);
+    await Promise.race([
+      task(page, account, seed),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`${taskName} timed out after ${Math.round(timeoutMs / 1000)}s`)), timeoutMs),
+      ),
+    ]);
     console.log(`[farm] ${account.xHandle} -> ${taskName} -> done`);
     await appendLog(`${account.xHandle} -> ${taskName} -> done`, "success");
     return true;
@@ -1282,10 +1288,10 @@ async function runTask(
 
 function taskPlanForRun(): TaskDef[] {
   return [
-    { name: "Daily Check-in", fn: taskDailyCheckIn as TaskFn, required: false },
-    { name: "Missions", fn: taskMissions as TaskFn, required: false },
-    { name: "Bounties", fn: taskBounties as TaskFn, required: false },
-    { name: "Create Concept", fn: taskCreateConcept as TaskFn, required: false },
+    { name: "Daily Check-in", fn: taskDailyCheckIn as TaskFn, required: false, timeoutMs: 45_000 },
+    { name: "Missions", fn: taskMissions as TaskFn, required: false, timeoutMs: 45_000 },
+    { name: "Bounties", fn: taskBounties as TaskFn, required: false, timeoutMs: 50_000 },
+    { name: "Create Concept", fn: taskCreateConcept as TaskFn, required: false, timeoutMs: 70_000 },
   ];
 }
 
@@ -1392,6 +1398,14 @@ export async function requestFarmStart(
   }
 
   const updated = [...allAccounts];
+  for (let i = 0; i < updated.length; i += 1) {
+    updated[i] = {
+      ...updated[i],
+      status: "idle",
+      dailyRotationSeed: seed,
+    };
+  }
+  await writeAccounts(updated);
   const started = nowIso();
   const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   await writeFarmStatus({
@@ -1528,7 +1542,10 @@ async function runFarmAccountsJob(
         for (let taskIndex = 0; taskIndex < tasks.length; taskIndex += 1) {
           if (await isSuperseded()) return;
           const task = tasks[taskIndex];
-          await runTask(page, farmAccount, seed, task.name, task.fn, { required: false });
+          await runTask(page, farmAccount, seed, task.name, task.fn, {
+            required: task.required,
+            timeoutMs: task.timeoutMs,
+          });
           completedSteps += 1;
           await patchStatus({ currentAccountProgress: Math.round((completedSteps / totalTasksPerAccount) * 100) });
         }
