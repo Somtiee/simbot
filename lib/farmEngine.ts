@@ -770,79 +770,20 @@ async function logDailyBonusCandidates(page: Page) {
   }
 }
 
-async function taskDailyCheckIn(page: Page) {
-  await waitForSimclusterApp(page);
-  await ensureDailyBountiesTab(page);
-  await logDailyBonusCandidates(page);
-
-  await humanPause(page, 800, 1800);
-  await clickFirstVisibleByRole(page, [/daily sign-?in/i, /sign-?in bonus/i, /billboard/i, /streak/i]).catch(() => null);
-
-  for (let pass = 0; pass < 4; pass += 1) {
-    await page.mouse.wheel(0, pass === 0 ? 400 : 750).catch(() => null);
-    await humanPause(page, 400, 900);
-    if (await tryClickDailyClaimControls(page)) {
-      await appendLog("Daily check-in: clicked a claim/collect control.", "success");
-      return;
-    }
-    if (await tryClickDailyBonusDomHeuristic(page)) {
-      await appendLog("Daily check-in: clicked via DOM heuristic (bonus-related text/aria).", "success");
-      return;
-    }
-  }
-
-  const openedBonuses = await openSectionWithRoutes(page, [...BONUS_NAV_LABELS], SECTION_ROUTES.bonuses);
-  if (!openedBonuses) {
-    for (const route of SECTION_ROUTES.bonuses) {
-      if (route.includes("bounties?tab=daily")) continue;
-      await page.goto(route, { waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => null);
-      await waitForSimclusterApp(page, 25000);
-      await dismissBlockingOverlays(page);
-      await humanPause(page, 600, 1200);
-      const body = (await page.locator("body").innerText().catch(() => "")) || "";
-      if (body.length > 400) break;
-    }
-  }
-  await humanPause(page, 600, 1200);
-  for (let pass = 0; pass < 3; pass += 1) {
-    await page.mouse.wheel(0, 700).catch(() => null);
-    await humanPause(page, 400, 800);
-    if (await tryClickDailyClaimControls(page)) {
-      await appendLog("Daily check-in: clicked a claim control (fallback route).", "success");
-      return;
-    }
-    if (await tryClickDailyBonusDomHeuristic(page)) {
-      await appendLog("Daily check-in: clicked via DOM heuristic (fallback route).", "success");
-      return;
-    }
-  }
-
-  const bodyText = (await page.locator("body").innerText().catch(() => "")) || "";
-  if (
-    /expires in 24 hours|already claimed|next reward|come back|claimed today|check back|billboard.*claimed|nothing to claim/i.test(
-      bodyText,
-    )
-  ) {
-    await appendLog("Daily check-in appears already claimed (or on cooldown).", "info");
-    return;
-  }
+async function taskDailyCheckIn(_page: Page) {
+  // Fresh strategy reset: daily sign-in / billboard are treated as manual to avoid farm stalls.
   await appendLog(
-    "Daily check-in: no claim control matched after /bounties?tab=daily. Continuing farm — claim manually if needed.",
-    "warn",
+    "Daily sign-in / billboard bonus is browser-manual for this strategy. Skipping automation and continuing.",
+    "info",
   );
 }
 
 async function taskMissions(page: Page) {
-  const opened = await openSectionWithRoutes(page, [...SELECTORS.navMissions, /get delta/i], SECTION_ROUTES.missions);
-  if (!opened) {
-    throw new Error("Could not open Missions.");
-  }
-  const before = (await page.locator("body").innerText().catch(() => "")) || "";
-  await clickAllVisibleClaims(page, 2, [/claim/i, /collect/i, /complete/i, /reward/i]);
-  const after = (await page.locator("body").innerText().catch(() => "")) || "";
-  if (before === after) {
-    await appendLog("Missions page opened but no claimable items were detected.", "warn");
-  }
+  await page.goto("https://simcluster.ai", { waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => null);
+  await waitForSimclusterApp(page, 20000);
+  await dismissBlockingOverlays(page);
+  await clickAllVisibleClaims(page, 1, [/claim/i, /collect/i, /complete/i, /reward/i, /challenge/i]);
+  await appendLog("Challenge/mission sweep completed on home/feed.", "info");
 }
 
 async function fillFirstTextbox(page: Page, value: string) {
@@ -961,27 +902,26 @@ async function taskBounties(page: Page, _account: SimclusterAccount, seed: numbe
     throw new Error("Could not open Bounties.");
   }
   await humanPause(page);
-
-  const claimed = await clickFirstVisibleByRole(page, [/claim free/i, /claim/i, /low[- ]?cost/i]);
-  if (claimed) return;
-
-  const started = await clickFirstVisibleByRole(page, [/new bounty/i, /place bounty/i, /create bounty/i]);
-  if (!started) {
-    await appendLog("Bounties page open but no claimable/new bounty action visible.", "warn");
+  // Fresh routine: prioritize claiming/submitting active reward bounties.
+  const claimed = await clickFirstVisibleByRole(page, [/claim reward/i, /claim/i, /collect/i, /reward/i]);
+  if (claimed) {
+    await appendLog("Bounty reward claimed.", "success");
     return;
   }
-  await humanPause(page);
-
-  const cents = 10 + (seed % 41);
-  const bountyInput = page.locator('input[placeholder*="amount" i], input[name*="amount" i]').first();
-  if (await bountyInput.isVisible().catch(() => false)) {
-    await bountyInput.fill((cents / 100).toFixed(2));
+  const started = await clickFirstVisibleByRole(page, [/open/i, /details/i, /view/i, /farm/i, /use concept/i]);
+  if (!started) {
+    await appendLog("Bounties page open but no active claimable bounty found.", "warn");
+    return;
   }
-  await clickFirstVisibleByRole(page, [/own concept/i, /my concept/i, /latest concept/i]);
-  const submitted = await clickFirstVisibleByRole(page, [/confirm/i, /place/i, /submit/i, /create/i]);
-  if (!submitted) {
-    throw new Error("Could not submit bounty.");
-  }
+  await humanPause(page, 800, 1600);
+  await clickFirstVisibleByRole(page, [/use concept/i, /select concept/i, /latest concept/i, /owned/i]).catch(() => null);
+  await trySelectPrimaryConcept(page).catch(() => null);
+  await runTask(page, { id: "tmp", xHandle: "@tmp", cookies: [], status: "idle" }, seed + 5, "Bounty Post", taskCreatePost as TaskFn, {
+    required: false,
+    timeoutMs: 55_000,
+  });
+  await clickFirstVisibleByRole(page, [/claim/i, /collect/i, /reward/i, /complete/i]).catch(() => null);
+  await appendLog("Bounty submission/claim attempt completed.", "info");
 }
 
 async function fillFirstVisibleLocator(page: Page, selector: string, value: string): Promise<boolean> {
@@ -1288,10 +1228,9 @@ async function runTask(
 
 function taskPlanForRun(): TaskDef[] {
   return [
-    { name: "Daily Check-in", fn: taskDailyCheckIn as TaskFn, required: false, timeoutMs: 45_000 },
-    { name: "Missions", fn: taskMissions as TaskFn, required: false, timeoutMs: 45_000 },
-    { name: "Bounties", fn: taskBounties as TaskFn, required: false, timeoutMs: 50_000 },
-    { name: "Create Concept", fn: taskCreateConcept as TaskFn, required: false, timeoutMs: 70_000 },
+    { name: "Daily Manual Note", fn: taskDailyCheckIn as TaskFn, required: false, timeoutMs: 10_000 },
+    { name: "Bounty Sweep", fn: taskBounties as TaskFn, required: false, timeoutMs: 70_000 },
+    { name: "Challenge Sweep", fn: taskMissions as TaskFn, required: false, timeoutMs: 35_000 },
   ];
 }
 
@@ -1382,9 +1321,7 @@ export async function requestFarmStart(
   const squadConfig = normalizeSquadConfig({ ...persistedConfig, ...configOverride });
   const tasks = taskPlanForRun();
   const postsPerAccount = getPostsPerAccountTarget();
-  const totalTasksPerAccount = squadConfig.enableSquadBountyFlywheel
-    ? tasks.length + squadConfig.bountiesPerAccount * 2 + 1
-    : tasks.length + postsPerAccount * 2 + 2;
+  const totalTasksPerAccount = tasks.length + postsPerAccount * 2 + 2;
 
   if (rotated.length === 0) {
     console.log("[farm] no accounts found in data/accounts.json");
@@ -1414,15 +1351,13 @@ export async function requestFarmStart(
     runId,
     startedAt: started,
     lastFarmHeartbeatAt: started,
-    totalAccounts: squadConfig.enableSquadBountyFlywheel ? rotated.length * 2 : rotated.length,
+    totalAccounts: rotated.length,
     squadConfig,
     bountyCycleDate: todayKeyUTC(),
     logs: [
       {
         ts: started,
-        text: squadConfig.enableSquadBountyFlywheel
-          ? `Farm started for ${rotated.length} account(s). Squad bounty flywheel enabled (${squadConfig.bountiesPerAccount} bounties/account).`
-          : `Farm started for ${rotated.length} account(s), target ${postsPerAccount} post(s) per account.`,
+        text: `Farm started for ${rotated.length} account(s), target up to ${postsPerAccount} post(s) per account (clout-aware).`,
         tone: "info",
       },
     ],
@@ -1460,7 +1395,7 @@ async function runFarmAccountsJob(
   await preflight.close().catch(() => null);
   await appendLog("Browser runtime check passed.", "info");
   const cycleDate = todayKeyUTC();
-  const totalUnits = squadConfig.enableSquadBountyFlywheel ? rotated.length * 2 : rotated.length;
+  const totalUnits = rotated.length;
   let completedUnits = 0;
   let totalBountiesCreated = 0;
   let totalBountiesFarmed = 0;
@@ -1551,47 +1486,7 @@ async function runFarmAccountsJob(
         }
       }
 
-      if (squadConfig.enableSquadBountyFlywheel && phase === "create") {
-        if (isSameBountyCycle(updated[originalIndex].lastBountyCycle, cycleDate)) {
-          await appendLog(`${farmAccount.xHandle} -> squad bounty creation already done today`, "info");
-        } else {
-          const created = await createSquadBounties(
-            page,
-            farmAccount,
-            cycleDate,
-            squadConfig.bountiesPerAccount,
-            squadConfig,
-            seed + originalIndex,
-          );
-          totalBountiesCreated += created.created;
-          await patchStatus({
-            bountyCreatedCount: totalBountiesCreated,
-            estimatedCloutEarned: totalBountiesFarmed * 25 + totalBountiesCreated * 10,
-          });
-          await appendLog(
-            `${farmAccount.xHandle} -> squad create phase done (${created.created}/${squadConfig.bountiesPerAccount})`,
-            created.created > 0 ? "success" : "warn",
-          );
-        }
-      } else if (squadConfig.enableSquadBountyFlywheel && phase === "farm") {
-        const farmed = await farmSquadBounties(
-          page,
-          farmAccount,
-          cycleDate,
-          squadConfig.bountiesPerAccount * rotated.length,
-          seed + originalIndex,
-        );
-        totalBountiesFarmed += farmed.farmed;
-        await patchStatus({
-          bountyFarmedCount: totalBountiesFarmed,
-          estimatedCloutEarned: totalBountiesFarmed * 25 + totalBountiesCreated * 10,
-        });
-        updated[originalIndex] = {
-          ...updated[originalIndex],
-          lastBountyCycle: cycleDate,
-        };
-        await appendLog(`${farmAccount.xHandle} -> squad farm phase done (${farmed.farmed} bounty actions)`, "success");
-      } else {
+      {
         await runTask(
           page,
           farmAccount,
@@ -1712,38 +1607,14 @@ async function runFarmAccountsJob(
     }
   };
 
-  if (squadConfig.enableSquadBountyFlywheel) {
-    await appendLog(`Squad bounty creation phase started (${squadConfig.bountiesPerAccount}/account).`, "info");
-    for (let i = 0; i < rotated.length; i += 1) {
-      if (await isSuperseded()) return;
-      await processAccount(rotated[i], "create");
-      completedUnits += 1;
-      await patchStatus({
-        completedAccounts: completedUnits,
-        overallProgress: Math.round((completedUnits / totalUnits) * 100),
-      });
-    }
-
-    await appendLog("Squad bounty farming phase started (all accounts farm squad bounties).", "info");
-    for (let i = 0; i < rotated.length; i += 1) {
-      if (await isSuperseded()) return;
-      await processAccount(rotated[i], "farm");
-      completedUnits += 1;
-      await patchStatus({
-        completedAccounts: completedUnits,
-        overallProgress: Math.round((completedUnits / totalUnits) * 100),
-      });
-    }
-  } else {
-    for (let i = 0; i < rotated.length; i += 1) {
-      if (await isSuperseded()) return;
-      await processAccount(rotated[i], "standard");
-      completedUnits += 1;
-      await patchStatus({
-        completedAccounts: completedUnits,
-        overallProgress: Math.round((completedUnits / totalUnits) * 100),
-      });
-    }
+  for (let i = 0; i < rotated.length; i += 1) {
+    if (await isSuperseded()) return;
+    await processAccount(rotated[i], "standard");
+    completedUnits += 1;
+    await patchStatus({
+      completedAccounts: completedUnits,
+      overallProgress: Math.round((completedUnits / totalUnits) * 100),
+    });
   }
 
   const finishedAt = new Date();
@@ -1764,18 +1635,14 @@ async function runFarmAccountsJob(
     bountyCreatedCount: totalBountiesCreated,
     bountyFarmedCount: totalBountiesFarmed,
     estimatedCloutEarned: totalBountiesFarmed * 25 + totalBountiesCreated * 10,
-    successMessage: squadConfig.enableSquadBountyFlywheel
-      ? `✅ Squad created ${totalBountiesCreated} bounties • All accounts farmed squad bounties • massive clout loop complete`
-      : `✅ AGENT FARM COMPLETE — ALL ${rotated.length} ACCOUNTS AT MAX DAILY CLOUT + NEW AI POSTS & IMAGES GENERATED`,
+    successMessage: `✅ AGENT FARM COMPLETE — ALL ${rotated.length} ACCOUNTS PROCESSED WITH FRESH MZT STRATEGY LOOP`,
     logs: [
       ...(await readFarmStatus()).logs.slice(-59),
       {
         ts: nowIso(),
-        text: squadConfig.enableSquadBountyFlywheel
-          ? `Squad created ${totalBountiesCreated} bounties • farmed ${totalBountiesFarmed} squad bounties • loop complete.`
-          : cooldownOn
-            ? `Farm complete for ${rotated.length} account(s). Cooldown started (24h).`
-            : `Farm complete for ${rotated.length} account(s). Cooldown is off — run again anytime (set FARM_COOLDOWN_ENABLED=1 to enforce 24h limits).`,
+        text: cooldownOn
+          ? `Farm complete for ${rotated.length} account(s). Cooldown started (24h).`
+          : `Farm complete for ${rotated.length} account(s). Cooldown is off — run again anytime (set FARM_COOLDOWN_ENABLED=1 to enforce 24h limits).`,
         tone: "success",
       },
     ],
