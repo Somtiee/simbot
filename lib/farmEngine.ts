@@ -269,6 +269,7 @@ function getPostsPerAccountTarget() {
 }
 
 const SQUAD_BOUNTY_PREFIX = "🔥 SQUAD-BOUNTY";
+const PRIMARY_CONCEPT_SHORT_ID = (process.env.SIMCLUSTER_PRIMARY_CONCEPT ?? "eNXWgYAn").trim();
 const SQUAD_BOUNTY_DESC_TEMPLATES = [
   "Drop your hardest {theme} slop using this concept and earn massive clout 🔥",
   "Speed-run a wild {theme} post from this concept and collect reward energy.",
@@ -282,6 +283,13 @@ const SQUAD_BOUNTY_DESC_TEMPLATES = [
   "One concept, one cracked {theme} post, one fast reward. Execute now.",
   "Generate a bold {theme} post, then submit and claim this squad bounty.",
 ];
+
+type SessionSnapshot = {
+  clout?: number;
+  dailyPostsRemaining?: number;
+  rank?: number;
+  unreadNotifications?: number;
+};
 
 function todayKeyUTC(): string {
   const d = new Date();
@@ -587,6 +595,64 @@ async function parseClout(page: Page) {
   return Number.isFinite(num) ? num : undefined;
 }
 
+function asRecord(v: unknown): Record<string, unknown> | null {
+  return v && typeof v === "object" ? (v as Record<string, unknown>) : null;
+}
+
+function extractNumberDeep(v: unknown, patterns: RegExp[]): number | undefined {
+  const stack: unknown[] = [v];
+  let scanned = 0;
+  while (stack.length > 0 && scanned < 800) {
+    const cur = stack.pop();
+    scanned += 1;
+    if (!cur || typeof cur !== "object") continue;
+    for (const [k, val] of Object.entries(cur as Record<string, unknown>)) {
+      if (typeof val === "number" && Number.isFinite(val) && patterns.some((p) => p.test(k))) return val;
+      if (typeof val === "string" && patterns.some((p) => p.test(k))) {
+        const n = Number(val.replace(/[^\d.-]/g, ""));
+        if (Number.isFinite(n)) return n;
+      }
+      if (val && typeof val === "object") stack.push(val);
+    }
+  }
+  return undefined;
+}
+
+async function fetchSessionSnapshot(token: string): Promise<SessionSnapshot> {
+  const trimmed = token.trim();
+  if (!trimmed) return {};
+  const headers = {
+    Authorization: `Bearer ${trimmed}`,
+    "X-Simcluster-Token": trimmed,
+  };
+  const urls = ["https://simcluster.ai/api/agent/session", "https://simcluster.ai/api/agent/delta/status"];
+  for (const url of urls) {
+    try {
+      const response = await fetch(url, { headers, cache: "no-store" });
+      if (!response.ok) continue;
+      const data: unknown = await response.json().catch(() => null);
+      if (!data) continue;
+      const root = asRecord(data);
+      const session = root ? (asRecord(root.session) ?? root) : null;
+      const clout = extractNumberDeep(session, [/clout/i, /balance/i]);
+      const dailyPostsRemaining = extractNumberDeep(session, [/daily.*remain/i, /posts?.*remain/i]);
+      const rank = extractNumberDeep(session, [/rank/i, /leaderboard/i]);
+      const unreadNotifications = extractNumberDeep(session, [/unread/i, /notification/i]);
+      return { clout, dailyPostsRemaining, rank, unreadNotifications };
+    } catch {
+      // try next endpoint
+    }
+  }
+  return {};
+}
+
+function computePostTargetByClout(clout?: number): number {
+  if (!Number.isFinite(clout)) return 4;
+  if ((clout ?? 0) < 100) return 0;
+  if ((clout ?? 0) < 500) return 2;
+  return 4;
+}
+
 async function ensureDailyBountiesTab(page: Page) {
   await page
     .goto("https://simcluster.ai/bounties?tab=daily", { waitUntil: "domcontentloaded", timeout: 30000 })
@@ -853,6 +919,7 @@ async function taskCreatePost(page: Page, _account: SimclusterAccount, seed: num
   }
   await humanPause(page);
 
+  await trySelectPrimaryConcept(page);
   await clickFirstVisibleByRole(page, [/latest concept/i, /select concept/i, /use concept/i]);
   await clickFirstVisibleByRole(page, [/owned/i, /my concepts/i, /random/i]);
   await humanPause(page);
@@ -1114,6 +1181,79 @@ async function taskLightEngagement(page: Page, accounts: SimclusterAccount[]) {
   }
 }
 
+async function taskWarmupSocial(page: Page, accounts: SimclusterAccount[]) {
+  // Warm-up: like 5-10, follow 2-3, tip 2-3 (1¢ style)
+  const ownHandles = accounts.map((a) => a.xHandle.toLowerCase());
+  let likes = 0;
+  let follows = 0;
+  let tips = 0;
+  const likeTarget = rand(5, 10);
+  const followTarget = rand(2, 3);
+  const tipTarget = rand(2, 3);
+
+  for (const cardSelector of SELECTORS.feedCards) {
+    const cards = page.locator(cardSelector);
+    const count = await cards.count().catch(() => 0);
+    for (let i = 0; i < count; i += 1) {
+      if (likes >= likeTarget && follows >= followTarget && tips >= tipTarget) break;
+      const card = cards.nth(i);
+      const text = (await card.innerText().catch(() => "")).toLowerCase();
+      if (ownHandles.some((h) => h && text.includes(h))) continue;
+
+      if (likes < likeTarget) {
+        const like = card
+          .locator("button, [role='button']")
+          .filter({ hasText: /like|heart/i })
+          .first();
+        if (await like.isVisible().catch(() => false)) {
+          await like.click({ timeout: 2500 }).catch(() => null);
+          likes += 1;
+          await humanPause(page, 300, 700);
+        }
+      }
+
+      if (follows < followTarget) {
+        const follow = card
+          .locator("button, a, [role='button']")
+          .filter({ hasText: /^follow$/i })
+          .first();
+        if (await follow.isVisible().catch(() => false)) {
+          await follow.click({ timeout: 2500 }).catch(() => null);
+          follows += 1;
+          await humanPause(page, 250, 600);
+        }
+      }
+
+      if (tips < tipTarget) {
+        const tip = card
+          .locator("button, a, [role='button']")
+          .filter({ hasText: /tip|send|¢\s*1|\+?\s*1\s*¢/i })
+          .first();
+        if (await tip.isVisible().catch(() => false)) {
+          await tip.click({ timeout: 2500 }).catch(() => null);
+          await clickFirstVisibleByRole(page, [/1¢|1 c|confirm|send/i]).catch(() => null);
+          tips += 1;
+          await humanPause(page, 250, 600);
+        }
+      }
+    }
+    if (likes >= likeTarget && follows >= followTarget && tips >= tipTarget) break;
+  }
+  await appendLog(`Warm-up done: likes ${likes}/${likeTarget}, follows ${follows}/${followTarget}, tips ${tips}/${tipTarget}.`, "info");
+}
+
+async function trySelectPrimaryConcept(page: Page) {
+  if (!PRIMARY_CONCEPT_SHORT_ID) return;
+  await clickFirstVisibleByRole(page, [/select concept/i, /use concept/i, /latest concept/i]).catch(() => null);
+  await fillFirstVisibleLocator(
+    page,
+    'input[placeholder*="search" i], input[type="search"], input[name*="concept" i]',
+    PRIMARY_CONCEPT_SHORT_ID,
+  ).catch(() => null);
+  await humanPause(page, 400, 800);
+  await clickFirstVisibleByRole(page, [new RegExp(PRIMARY_CONCEPT_SHORT_ID, "i"), /use concept/i, /select/i]).catch(() => null);
+}
+
 async function runTask(
   page: Page,
   account: SimclusterAccount,
@@ -1238,7 +1378,7 @@ export async function requestFarmStart(
   const postsPerAccount = getPostsPerAccountTarget();
   const totalTasksPerAccount = squadConfig.enableSquadBountyFlywheel
     ? tasks.length + squadConfig.bountiesPerAccount * 2 + 1
-    : tasks.length + postsPerAccount * 2 + 1;
+    : tasks.length + postsPerAccount * 2 + 2;
 
   if (rotated.length === 0) {
     console.log("[farm] no accounts found in data/accounts.json");
@@ -1383,6 +1523,7 @@ async function runFarmAccountsJob(
       }
 
       let completedSteps = 0;
+      const sessionBefore = token ? await fetchSessionSnapshot(token) : {};
       if (phase !== "farm") {
         for (let taskIndex = 0; taskIndex < tasks.length; taskIndex += 1) {
           if (await isSuperseded()) return;
@@ -1434,14 +1575,36 @@ async function runFarmAccountsJob(
         };
         await appendLog(`${farmAccount.xHandle} -> squad farm phase done (${farmed.farmed} bounty actions)`, "success");
       } else {
+        await runTask(
+          page,
+          farmAccount,
+          seed + 50,
+          "Warm-up Social",
+          async (p) => {
+            await taskWarmupSocial(p, updated);
+          },
+          { required: false },
+        );
+        completedSteps += 1;
+        await patchStatus({ currentAccountProgress: Math.round((completedSteps / totalTasksPerAccount) * 100) });
+
+        const liveClout = (await parseClout(page)) ?? sessionBefore.clout;
+        const cloutDrivenTarget = computePostTargetByClout(liveClout);
+        const targetPosts = Math.min(postsPerAccount, cloutDrivenTarget);
+        if (targetPosts === 0) {
+          await appendLog(
+            `${farmAccount.xHandle} -> clout below 100, skipping posts and doing engagement-only session.`,
+            "warn",
+          );
+        }
         let postsCompleted = 0;
-        for (let postIndex = 0; postIndex < postsPerAccount; postIndex += 1) {
+        for (let postIndex = 0; postIndex < targetPosts; postIndex += 1) {
           if (await isSuperseded()) return;
           const postOk = await runTask(
             page,
             farmAccount,
             seed + postIndex,
-            `Create Post ${postIndex + 1}/${postsPerAccount}`,
+            `Create Post ${postIndex + 1}/${targetPosts}`,
             taskCreatePost as TaskFn,
             { required: false },
           );
@@ -1453,7 +1616,7 @@ async function runFarmAccountsJob(
             page,
             farmAccount,
             seed + 100 + postIndex,
-            `Light Engagement ${postIndex + 1}/${postsPerAccount}`,
+            `Light Engagement ${postIndex + 1}/${targetPosts}`,
             async (p) => {
               await taskLightEngagement(p, updated);
             },
@@ -1463,10 +1626,10 @@ async function runFarmAccountsJob(
           await patchStatus({ currentAccountProgress: Math.round((completedSteps / totalTasksPerAccount) * 100) });
         }
         await appendLog(
-          `${farmAccount.xHandle} -> posting sprint result: ${postsCompleted}/${postsPerAccount} post(s) completed`,
+          `${farmAccount.xHandle} -> posting sprint result: ${postsCompleted}/${targetPosts} post(s) completed`,
           postsCompleted > 0 ? "success" : "warn",
         );
-        if (postsCompleted === 0) {
+        if (targetPosts > 0 && postsCompleted === 0) {
           throw new Error("No posts were created for this account.");
         }
       }
@@ -1488,18 +1651,29 @@ async function runFarmAccountsJob(
       }
 
       const parsedClout = await parseClout(page);
+      const sessionAfter = token ? await fetchSessionSnapshot(token) : {};
       updated[originalIndex] = {
         ...updated[originalIndex],
         xHandle: farmAccount.xHandle,
         status: "completed",
         lastFarmed: nowIso(),
-        cloutEstimate: parsedClout ?? updated[originalIndex].cloutEstimate,
+        cloutEstimate: parsedClout ?? sessionAfter.clout ?? updated[originalIndex].cloutEstimate,
         dailyRotationSeed: seed,
       };
       await appendLog(
         `${farmAccount.xHandle} -> completed -> +${updated[originalIndex].cloutEstimate ?? "?"} CLOUT est.`,
         "success",
       );
+      if (
+        Number.isFinite(sessionAfter.rank) ||
+        Number.isFinite(sessionAfter.dailyPostsRemaining) ||
+        Number.isFinite(sessionAfter.unreadNotifications)
+      ) {
+        await appendLog(
+          `${farmAccount.xHandle} -> session report: rank #${sessionAfter.rank ?? "?"}, posts remaining ${sessionAfter.dailyPostsRemaining ?? "?"}, unread ${sessionAfter.unreadNotifications ?? "?"}.`,
+          "info",
+        );
+      }
     } catch (error) {
       if (page) await safeShot(page, `${account.id}-account-failure`).catch(() => null);
       const detail = error instanceof Error ? error.message : String(error);
